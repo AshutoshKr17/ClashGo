@@ -397,20 +397,55 @@ func (c *Classifier) buildRules() {
 				{324, 499, 0xCB, 0xCD, 0xD3, 15},
 			},
 		},
+		// StateSearching is the white matchmaking screen with the Return
+		// Home button bottom-left. CoC draws two messages on it that the
+		// bot cannot tell apart by pixel: "Searching for opponents..."
+		// (normal, 1-5 s) and "Unable to attack Village! Try again
+		// later." (stays until Return Home is tapped). A glyph probe on
+		// the message was tried and hit the dark outline of both texts
+		// (2026-11-08, three frames in one search), so the rule is the
+		// button alone and the search loop decides by how long the
+		// screen persists (see searchScreenStuckAfter in internal/bot).
+		// Priority 99 so it is scored before SearchMap, whose white
+		// probes also match this screen.
+		{
+			State:    StateSearching,
+			Priority: 99,
+			Weight:   120,
+			Desc:     "matchmaking screen (Searching for opponents / Unable to attack), Return Home bottom-left",
+			Anchor:   AnchorEdge,
+			MinPass:  2,
+			Checks: []PixelCheck{
+				// Beige Return Home button face, bottom-left.
+				{48, 632, 0xD3, 0xC6, 0x96, 22},
+				// Portrait on that button. This is the tap target.
+				{60, 640, 0xBA, 0x48, 0x2A, 28},
+			},
+		},
 		// StateChestReward is the post-attack event-reward chest screen.
 		//
-		// Detection uses the distinct vault room signature (arched sunlight
-		// beam at top center, dark stone walls, warm wooden floor) and/or
-		// the hammer prompt template if present. Priority 98 ensures it outranks
-		// transitional splash states (e.g. TapToContinue at 97 whose "Tap!" probe
-		// otherwise misfires on the chest's "Tap!" prompt).
+		// Detection uses the vault room signature (arched sunlight beam at
+		// top center, dark stone walls, warm wooden floor) plus the hammer
+		// prompt template. Priority 98 outranks the transitional splash
+		// states (TapToContinue at 97 misfires on the chest's "Tap!" prompt).
+		//
+		// MinPass is 4 — EVERY probe. Measured 2026-11-08 on a live 860x732
+		// battle frame: the two dark-corner probes and the wood-floor probe
+		// all pass (d=32, d=25, d=34) while the bright-arch probe misses
+		// (d=86). At MinPass 3 that classified the battle as a chest, so the
+		// bot spent the whole attack tapping the field centre — the red
+		// zone, 0% damage, "You cannot deploy troops on the red area!". The
+		// arch beam is the one probe the battle HUD never has, so requiring
+		// all four rejects the battle frame. A missed real chest falls
+		// through to the stuck-watchdog; a false chest during a battle
+		// spends the army.
 		{
 			State:    StateChestReward,
 			Priority: 98,
 			Weight:   105,
 			Desc:     "post-attack reward chest screen (vault room or hammer template)",
 			Anchor:   AnchorEdge,
-			MinPass:  3,
+			MinPass:  4,
 			Checks: []PixelCheck{
 				// Bright arched window sunlight beam at top center
 				{430, 122, 0xF0, 0xEB, 0xCD, 45},
@@ -429,7 +464,14 @@ func (c *Classifier) buildRules() {
 			Weight:   98,
 			Desc:     "search map - clouds",
 			Anchor:   AnchorCenter,
-			MinPass:  1,
+			// MinPass 2. At 1 the dark bottom-left probe alone fired
+			// this rule, and on a village with sea along that edge
+			// (live 2026-11-08: (38,603) = #0B2B3E, d=9) the home
+			// screen read as clouds at priority 98, outranking
+			// MainVillage. The search loop then spun "still searching"
+			// on the village for its whole 5-minute budget. Real clouds
+			// pass all three white probes, so the bar costs nothing.
+			MinPass: 2,
 			Checks: []PixelCheck{
 				{290, 366, 0xFF, 0xFF, 0xFF, 30},
 				{135, 204, 0xEE, 0xF5, 0xFF, 30},
@@ -883,7 +925,15 @@ func (c *Classifier) buildRules() {
 			Weight:   98,
 			Desc:     "connection lost dialog (TRY AGAIN / RETURN HOME)",
 			Anchor:   AnchorCenter,
-			MinPass:  2,
+			// MinPass 3. It was 2, and a live 860x732 battle against a
+			// base with light-blue walls hit two of the light-grey
+			// glyph probes (2026-11-08): the bot read ConnectionLost
+			// mid-fight, the attack executor aborted the battle wait,
+			// and an earlier run restarted the game on the same misread.
+			// The real dialog passes all three reference probes here,
+			// and at 720p the dark panel plus the two measured glyph
+			// probes below (3 of 5), so the bar costs no real detection.
+			MinPass: 3,
 			Checks: []PixelCheck{
 				// TRY AGAIN button text (light blue-gray)
 				{300, 478, 0xCB, 0xE6, 0xFF, 40},

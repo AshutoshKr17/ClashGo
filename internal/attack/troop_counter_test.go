@@ -354,6 +354,24 @@ func TestTroopCountWindowCoversTheBadgeAndNotTheLevel(t *testing.T) {
 		top, bottom, labelRowTop, labelRowBottom, levelRowTop, levelRowBottom)
 }
 
+// TestTroopCountWindowCovers2026InCardBadge pins the 2026 layout at the
+// reference geometry (860x732, bar_y=632): the `xN` badge sits inside the card
+// at y 643..653, and the level digit sits at y ~700..715. Live 2026-11-08 the
+// band stopped at bar_y-2 and every card read zero, so the sweep wrote off an
+// Electro Dragon card that still held 3.
+func TestTroopCountWindowCovers2026InCardBadge(t *testing.T) {
+	tc := NewTroopCounter(game.NewCalibration(860, 732), 860, 732, zerolog.Nop())
+	const barY, badgeTop, badgeBottom, levelTop = 632, 643, 653, 700
+	row := tc.badgeGeometryRow(barY)
+	if row.top > badgeTop || row.bottom < badgeBottom {
+		t.Errorf("badge band y %d..%d does not cover the in-card badge rows %d..%d", row.top, row.bottom, badgeTop, badgeBottom)
+	}
+	slack := int(tc.scale(countBandSlackRef))
+	if row.bottom+slack >= levelTop {
+		t.Errorf("badge band (+slack) reaches y %d, at or below the level row %d", row.bottom+slack, levelTop)
+	}
+}
+
 // TestBarLegibleSeparatesSpentFromBlind covers the distinction the reconcilers
 // now branch on. A bar with labels somewhere is legible, so a card with no label
 // is a measured zero; a frame with no legible label anywhere is unknown, and a

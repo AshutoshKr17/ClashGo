@@ -1158,6 +1158,26 @@ func (b *Bot) processFrame(gc *game.GameContext, screen gocv.Mat, err error, cap
 	// activity is deliberately NOT recorded: the adb tap reports success even
 	// when the dialog survives, and the stuck-watchdog must still fire if
 	// reconnect keeps failing.
+	// Matchmaking screen outside an attack sequence (seqRunning is false
+	// here) means a search was abandoned on it, e.g. "Unable to attack
+	// Village! Try again later." after the sequence gave up. Return Home
+	// is the only exit, and the sequence that would wait it out is gone.
+	if state == game.StateSearching {
+		if b.connLostDismissInFlight.CompareAndSwap(false, true) {
+			b.logger.Warn().Msg("matchmaking screen with no attack in progress; tapping Return Home")
+			go func() {
+				defer b.connLostDismissInFlight.Store(false)
+				time.Sleep(400 * time.Millisecond)
+				if !game.DismissOverlay(b.client, b.cal, b.classifier, game.StateSearching, b.templates, b.logger) {
+					b.logger.Warn().Msg("matchmaking screen not dismissed; will retry")
+					return
+				}
+				b.logger.Info().Msg("returned home from matchmaking screen")
+			}()
+		}
+		return
+	}
+
 	if state == game.StateConnectionLost {
 		if b.connLostDismissInFlight.CompareAndSwap(false, true) {
 			b.logger.Warn().Msg("connection lost dialog detected; tapping TRY AGAIN...")
@@ -1714,6 +1734,8 @@ func (b *Bot) executeAttackSequence(gc *game.GameContext) {
 	var stratName string = "Unknown"
 	var targetEdge string = "Unknown"
 	var searchSkips int = 0
+	villageFrames := 0
+	var searchScreenSince time.Time
 
 	searchStart := time.Now()
 	for {
@@ -1758,11 +1780,49 @@ func (b *Bot) executeAttackSequence(gc *game.GameContext) {
 		}
 
 		state, _ := b.classify(screen)
+		if state != game.StateSearching {
+			searchScreenSince = time.Time{}
+		}
 		if state != game.StateBattle {
+			if state == game.StateSearching {
+				villageFrames = 0
+				if searchScreenSince.IsZero() {
+					searchScreenSince = time.Now()
+				}
+				if time.Since(searchScreenSince) > searchScreenStuckAfter {
+					b.logger.Warn().Dur("on_screen", time.Since(searchScreenSince)).
+						Msg("matchmaking screen has not produced a base (Unable to attack Village?); tapping Return Home")
+					screen.Close()
+					game.DismissOverlay(b.client, b.cal, b.classifier, game.StateSearching, b.templates, b.logger)
+					b.lastAttackEnd = time.Now()
+					lootRec.Close()
+					return
+				}
+				b.logger.Info().Str("state", state.String()).Msg("still searching (matchmaking)...")
+				screen.Close()
+				continue
+			}
 			if state == game.StateSearchMap || state == game.StateLoading {
+				villageFrames = 0
 				b.logger.Info().Str("state", state.String()).Msg("still searching (clouds)...")
 				screen.Close()
 				continue
+			}
+			// Back in the village mid-search (e.g. "Unable to attack
+			// Village" sent us home): the search is over. Hand back for
+			// a fresh attempt instead of waiting out the 5-minute budget.
+			if villageStatesThatMeanTheSearchDidNotStart(state) {
+				villageFrames++
+				if villageFrames >= searchNeverStartedFrames {
+					b.logger.Warn().Str("state", state.String()).
+						Msg("the client is back in the village mid-search; ending this search for a fresh attempt")
+					b.lastAttackEnd = time.Now()
+					screen.Close()
+					lootRec.Close()
+					return
+				}
+			} else {
+				villageFrames = 0
 			}
 			b.logger.Info().Str("state", state.String()).Msg("searching area (wait)...")
 
@@ -1880,9 +1940,14 @@ func (b *Bot) executeAttackSequence(gc *game.GameContext) {
 			return
 		}
 
-		screen.Close()
-
 		if !b.findAndClick("btn_next", "Next Match", 2) {
+			if b.ctx.Err() != nil {
+				// Stop pressed mid-search: the ADB client is closed, so the
+				// template miss is not a real miss. Leave without touching it.
+				screen.Close()
+				lootRec.Close()
+				return
+			}
 			b.logger.Warn().Msg("template match failed, forcing skip via color/pinpoint")
 
 			// The orange Next button is LOCATED (PixelSearch), never predicted. The
@@ -1903,6 +1968,10 @@ func (b *Bot) executeAttackSequence(gc *game.GameContext) {
 				})
 			}
 		}
+		// Closed here, not before findAndClick: the orange fallback above reads
+		// this Mat, and a Region() on a closed Mat aborts the whole process
+		// (live 2026-11-08: pressing Stop mid-search killed the GUI).
+		screen.Close()
 
 		time.Sleep(600 * time.Millisecond)
 	}
@@ -2289,13 +2358,13 @@ func (b *Bot) clickSequence() bool {
 	}
 	b.client.JitteredSleep(500 * time.Millisecond)
 
-	// Find a Match. Off the reference geometry the attack menu reflows, so the
-	// button is located in the live frame rather than predicted — and that also
-	// removes the reason the old blind tap failed live at 1280x720: it fired one
-	// second after the Attack tap, while the menu was still animating in, landed
-	// on the village behind it, and closed the menu again. Waiting for the
-	// button to *exist* is what makes the step safe.
-	if !b.cal.IsReferenceGeometry() {
+	// Find a Match. The 2026 attack menu (Battle card + Ranked Battle card)
+	// reflowed the buttons even at the 860×732 reference, so the authored
+	// pinpoints for Find Match / Army Arrow / Battle land on the Ranked card
+	// and open its info dialog. Locate the yellow Find a Match button and the
+	// army sheet's green Attack in the live frame at every geometry. Waiting
+	// for the button to exist also covers the menu's open animation.
+	{
 		// The Attack tap is *verified*, not assumed: tapping a predicted point and
 		// trusting it is what killed the 1280x720 runs. See clearSwallowedTap for
 		// the measured reason a tap aimed at the village can land somewhere else.
@@ -2362,87 +2431,6 @@ func (b *Bot) clickSequence() bool {
 		}
 		return false
 	}
-
-	findMatchClicked := false
-	for attempt := 0; attempt < 3; attempt++ {
-		if b.findAndClick("btn_find_match", "Find Match", 1) {
-			findMatchClicked = true
-			break
-		}
-		b.client.JitteredSleep(500 * time.Millisecond)
-	}
-	if !findMatchClicked {
-		b.logger.Warn().Msg("could not find or click Find Match button")
-		if screen, err := b.client.CaptureToMat(); err == nil {
-			b.DumpDiagnostics("click_find_match_failed", screen, nil)
-			screen.Close()
-		}
-		return false
-	}
-	b.client.JitteredSleep(500 * time.Millisecond)
-
-	armyArrowClicked := false
-	for attempt := 0; attempt < 3; attempt++ {
-		if b.findAndClick("btn_army_arrow", "Army Arrow", 1) {
-			armyArrowClicked = true
-			break
-		}
-		b.client.JitteredSleep(500 * time.Millisecond)
-	}
-	if !armyArrowClicked {
-		b.logger.Warn().Msg("could not find or click Army Arrow button")
-		if screen, err := b.client.CaptureToMat(); err == nil {
-			b.DumpDiagnostics("click_army_arrow_failed", screen, nil)
-			screen.Close()
-		}
-		return false
-	}
-	b.client.JitteredSleep(500 * time.Millisecond)
-
-	armyClicked := false
-	for attempt := 0; attempt < 3; attempt++ {
-		if b.selectArmySlot() {
-			armyClicked = true
-			break
-		}
-		b.client.JitteredSleep(500 * time.Millisecond)
-	}
-	if !armyClicked {
-		if screen, err := b.client.CaptureToMat(); err == nil {
-			b.DumpDiagnostics("click_army_slot_not_found", screen, map[string]interface{}{"army_slot": b.armySlot})
-			screen.Close()
-		}
-		if b.armySlot > 1 {
-			// Fail closed: an explicitly requested saved recipe (slot > 1)
-			// that never selected means the battle would run with whatever
-			// army is currently active — silently wrong composition, a
-			// wasted attack. There is no positive "selected" evidence to
-			// check (the toast is transient and unmapped), so a tap that
-			// did not land after 3 attempts is enough to refuse.
-			b.logger.Error().
-				Int("army_slot", b.armySlot).
-				Msg("saved army recipe card did not select after retries; refusing to attack with an unconfirmed army")
-			return false
-		}
-		b.logger.Warn().Int("army_slot", b.armySlot).Msg("army recipe card did not appear, continuing anyway")
-	}
-	b.client.JitteredSleep(500 * time.Millisecond)
-
-	battleClicked := false
-	for attempt := 0; attempt < 3; attempt++ {
-		if b.findAndClick("btn_battle", "Battle", 1) {
-			battleClicked = true
-			break
-		}
-		b.client.JitteredSleep(500 * time.Millisecond)
-	}
-	if !battleClicked {
-		b.logger.Warn().Msg("could not find or click Battle button")
-		return false
-	}
-
-	b.logger.Info().Msg("waiting for battle state (searching)...")
-	return b.waitForBattleState(60 * time.Second)
 }
 
 // pressPanelAction waits for a panel's primary action button to appear inside a
@@ -2990,10 +2978,19 @@ func villageStatesThatMeanTheSearchDidNotStart(state game.GameState) bool {
 	return false
 }
 
+// searchScreenStuckAfter is how long the matchmaking screen (game.StateSearching)
+// may stay up before it is read as "Unable to attack Village! Try again later."
+// and Return Home is tapped. The two messages share every pixel the classifier
+// can probe (same button, same text position, both outlined dark), so time is
+// the discriminator: measured 2026-11-08, a normal "Searching for opponents..."
+// resolves to a base in 1-5 s; the failure message sits until dismissed.
+const searchScreenStuckAfter = 12 * time.Second
+
 func (b *Bot) waitForBattleState(timeout time.Duration) bool {
 	deadline := time.Now().Add(timeout)
 	villageFrames := 0
 	unknownFrames := 0
+	var searchScreenSince time.Time
 	for time.Now().Before(deadline) {
 		screen, err := b.client.CaptureToMat()
 		if err != nil {
@@ -3003,11 +3000,28 @@ func (b *Bot) waitForBattleState(timeout time.Duration) bool {
 
 		state, _ := b.classify(screen)
 		screen.Close()
+		if state != game.StateSearching {
+			searchScreenSince = time.Time{}
+		}
 
 		switch {
 		case state == game.StateBattle:
 			b.logger.Info().Msg("battle state detected, entering search loop")
 			return true
+		case state == game.StateSearching:
+			villageFrames = 0
+			unknownFrames = 0
+			if searchScreenSince.IsZero() {
+				searchScreenSince = time.Now()
+			}
+			if time.Since(searchScreenSince) > searchScreenStuckAfter {
+				b.logger.Warn().Msg("matchmaking screen never produced a base (Unable to attack Village?); tapping Return Home")
+				game.DismissOverlay(b.client, b.cal, b.classifier, game.StateSearching, b.templates, b.logger)
+				return false
+			}
+			b.logger.Info().Msg("in matchmaking...")
+			time.Sleep(1 * time.Second)
+			continue
 		case state == game.StateSearchMap || state == game.StateLoading:
 			villageFrames = 0
 			unknownFrames = 0

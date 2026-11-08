@@ -135,6 +135,15 @@ func (e *Executor) DeployDynamicV2(s *strategy.DynamicStrategy, screen gocv.Mat,
 		// rotation_state.go for the failure-mode / concurrency story.
 		targetEdge = NextEdgeIndex()
 		e.logger.Info().Str("edge", targetEdge).Msg("rotated to next edge")
+	case strings.EqualFold(targetEdge, "Loot"), strings.EqualFold(targetEdge, "LootSide"):
+		if side, n := lootSide(screen); side != "" {
+			targetEdge = side
+			e.logger.Info().Str("edge", targetEdge).Int("loot_pixels", n).Msg("loot side selected")
+		} else {
+			edges := []string{"TopLeft", "TopRight", "BottomLeft", "BottomRight"}
+			targetEdge = edges[rand.Intn(len(edges))]
+			e.logger.Warn().Str("edge", targetEdge).Msg("no loot side readable; random edge selected")
+		}
 	case strings.EqualFold(targetEdge, "Random"):
 		edges := []string{"TopLeft", "TopRight", "BottomLeft", "BottomRight"}
 		targetEdge = edges[rand.Intn(len(edges))]

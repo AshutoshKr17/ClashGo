@@ -62,6 +62,28 @@ func TestBattleLootSearchCoversObserved720pLootRows(t *testing.T) {
 	}
 }
 
+// TestScoutLootIgnoresPinnedScaleOnReferenceGeometry pins the search-screen
+// bands. They are authored in 860x732 pixels. A display_scale pin of 1.1334
+// on that framebuffer slid gold onto the elixir row, elixir onto the dark
+// row, and dark into the grass, so a real 1377813/533853/13903 read as
+// 533853/13903/0 and every non-zero threshold skipped.
+func TestScoutLootIgnoresPinnedScaleOnReferenceGeometry(t *testing.T) {
+	cal := NewCalibration(RefWidth, RefHeight)
+	cal.SetDisplayScale(1.1334)
+	lr := &LootRecognizer{cal: cal, scale: cal.DisplayScale()}
+	if got := lr.scoutLootScale(); got != 1 {
+		t.Fatalf("reference geometry used scale %v; the loot bands would land on the next resource", got)
+	}
+
+	wide := NewCalibration(1280, 720)
+	wide.SetDisplayScale(1.325)
+	lr.cal = wide
+	lr.scale = 1.325
+	if got := lr.scoutLootScale(); got != 1.325 {
+		t.Fatalf("non-reference geometry used scale %v, want the pinned 1.325", got)
+	}
+}
+
 // TestSearchZonesCoverReferenceFixtureRows keeps the reference-resolution
 // fixture inside the same zones: the two geometries disagree about where the
 // panel columns sit (the 16:9 layout is wider), and one pair of zones has to

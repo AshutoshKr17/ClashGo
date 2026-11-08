@@ -3,6 +3,7 @@ package game
 import (
 	"image"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/rs/zerolog"
@@ -48,8 +49,13 @@ func TestClassify_ChestDetectedOnChestFrame(t *testing.T) {
 	// Fill with a dark neutral background so the hammer stands out.
 	m.SetTo(gocv.NewScalar(30, 30, 30, 0))
 
-	// Paint the bright arched window beam at top center
+	// Paint the full vault-room signature. All four probes are required
+	// (MinPass 4); the dark background alone only covers the two corner
+	// probes, so the arch beam and the wood floor must be painted.
 	setRGB(m, 430, 122, 0xF0, 0xEB, 0xCD)
+	setRGB(m, 40, 50, 0x36, 0x2A, 0x1F)
+	setRGB(m, 820, 50, 0x32, 0x21, 0x11)
+	setRGB(m, 760, 690, 0x60, 0x2C, 0x18)
 
 	hammer := gocv.IMRead("../../assets/templates/hammer.png", gocv.IMReadColor)
 	defer hammer.Close()
@@ -94,6 +100,108 @@ func TestClassify_RealChestFrames(t *testing.T) {
 		m.Close()
 		if state != StateChestReward {
 			t.Fatalf("%s: expected StateChestReward, got %s (score=%d)", path, state, score)
+		}
+	}
+}
+
+// TestClassify_NoFalseChestOnBattleFrame guards the MinPass 4 requirement.
+// A live 860x732 battle frame passed the two dark-corner probes and the
+// wood-floor probe but missed the bright-arch probe, and at MinPass 3 that
+// was enough to classify the battle as a chest. This frame reproduces
+// exactly those three hits with no arch beam and no hammer template.
+func TestClassify_NoFalseChestOnBattleFrame(t *testing.T) {
+	c := newChestClassifier(t)
+
+	m := gocv.NewMatWithSize(RefHeight, RefWidth, gocv.MatTypeCV8UC3)
+	defer m.Close()
+	m.SetTo(gocv.NewScalar(30, 30, 30, 0))
+
+	setRGB(m, 40, 50, 0x36, 0x2A, 0x1F)
+	setRGB(m, 820, 50, 0x32, 0x21, 0x11)
+	setRGB(m, 760, 690, 0x60, 0x2C, 0x18)
+
+	state, _ := c.ClassifyState(m)
+	if state == StateChestReward {
+		t.Fatalf("chest rule fired on a frame missing the arch beam (state=%s)", state)
+	}
+}
+
+// TestClassify_Searching fires only when the matchmaking screen's Return
+// Home button is present. A plain white frame is what SearchMap already
+// matches; this screen must not be that.
+func TestClassify_Searching(t *testing.T) {
+	c := newChestClassifier(t)
+
+	white := gocv.NewMatWithSize(RefHeight, RefWidth, gocv.MatTypeCV8UC3)
+	defer white.Close()
+	white.SetTo(gocv.NewScalar(255, 255, 255, 0))
+	if state, _ := c.ClassifyState(white); state == StateSearching {
+		t.Fatal("white frame classified as Searching")
+	}
+
+	m := gocv.NewMatWithSize(RefHeight, RefWidth, gocv.MatTypeCV8UC3)
+	defer m.Close()
+	m.SetTo(gocv.NewScalar(255, 255, 255, 0))
+	setRGB(m, 48, 632, 0xD3, 0xC6, 0x96)
+	setRGB(m, 60, 640, 0xBA, 0x48, 0x2A)
+
+	state, _ := c.ClassifyState(m)
+	if state != StateSearching {
+		t.Fatalf("expected StateSearching, got %s", state)
+	}
+}
+
+// TestClassify_NoConnectionLostOnTwoLightProbes pins MinPass 3: a battle
+// frame whose light-blue walls hit two glyph probes must not read as the
+// disconnect dialog.
+func TestClassify_NoConnectionLostOnTwoLightProbes(t *testing.T) {
+	c := newChestClassifier(t)
+
+	m := gocv.NewMatWithSize(RefHeight, RefWidth, gocv.MatTypeCV8UC3)
+	defer m.Close()
+	m.SetTo(gocv.NewScalar(60, 110, 70, 0))
+	setRGB(m, 300, 478, 0xCB, 0xE6, 0xFF)
+	setRGB(m, 431, 581, 0xCB, 0xE6, 0xFF)
+
+	if state, _ := c.ClassifyState(m); state == StateConnectionLost {
+		t.Fatal("ConnectionLost fired on two light probes with no dark panel")
+	}
+}
+
+// TestClassify_NoSearchMapOnSeaAlone pins SearchMap's MinPass 2: a frame
+// whose only hit is the dark bottom-left probe (village sea) must not read
+// as search clouds.
+func TestClassify_NoSearchMapOnSeaAlone(t *testing.T) {
+	c := newChestClassifier(t)
+
+	m := gocv.NewMatWithSize(RefHeight, RefWidth, gocv.MatTypeCV8UC3)
+	defer m.Close()
+	m.SetTo(gocv.NewScalar(60, 110, 70, 0))
+	setRGB(m, 38, 603, 0x0B, 0x2B, 0x3E)
+
+	if state, _ := c.ClassifyState(m); state == StateSearchMap {
+		t.Fatal("SearchMap fired on the dark corner probe alone")
+	}
+}
+
+// TestClassify_SearchingFrames classifies captured frames listed in
+// CLASHGO_SEARCH_FRAMES (comma-separated paths). Skips otherwise, so CI
+// never needs the pngs (those are gitignored).
+func TestClassify_SearchingFrames(t *testing.T) {
+	list := os.Getenv("CLASHGO_SEARCH_FRAMES")
+	if list == "" {
+		t.Skip("CLASHGO_SEARCH_FRAMES not set")
+	}
+	c := newChestClassifier(t)
+	for _, path := range strings.Split(list, ",") {
+		m := gocv.IMRead(path, gocv.IMReadColor)
+		if m.Empty() {
+			t.Fatalf("could not read %s", path)
+		}
+		state, score := c.ClassifyState(m)
+		m.Close()
+		if state != StateSearching {
+			t.Fatalf("%s: expected StateSearching, got %s (score=%d)", path, state, score)
 		}
 	}
 }

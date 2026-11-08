@@ -688,6 +688,24 @@ func (lr *LootRecognizer) safeRect(img gocv.Mat, r image.Rectangle) image.Rectan
 	return r
 }
 
+// scoutLootScale maps the reference-pixel loot bands onto the live frame.
+//
+// On the reference framebuffer (860x732) those bands are already live pixels.
+// A pinned display scale other than 1 slides each band down onto the next
+// resource: live 2026-11-08, scale 1.1334 read gold 1,377,813 / elixir 533,853 /
+// dark 13,903 as 533,853 / 13,903 / 0, so every non-zero elixir or dark
+// threshold skipped the base. Off the reference geometry the pinned scale is
+// the mapping the rest of the HUD uses, and the bands follow it.
+func (lr *LootRecognizer) scoutLootScale() float64 {
+	if lr.cal != nil && lr.cal.IsReferenceGeometry() {
+		return 1
+	}
+	if lr.scale <= 0 {
+		return 1
+	}
+	return lr.scale
+}
+
 func (lr *LootRecognizer) ReadLootDetailed(screen gocv.Mat) (LootReport, error) {
 	// High-Precision ROIs for Scouting (Reference 860x732)
 	// We use very inclusive X range (starting at 40) because digits start immediately after icons
@@ -700,6 +718,7 @@ func (lr *LootRecognizer) ReadLootDetailed(screen gocv.Mat) (LootReport, error) 
 		{"de", "icon_de", 124, 157},
 	}
 
+	k := lr.scoutLootScale()
 	var results [3]int
 	for i, ic := range icons {
 		tpl, ok := lr.templates.Get(ic.tpl)
@@ -715,17 +734,17 @@ func (lr *LootRecognizer) ReadLootDetailed(screen gocv.Mat) (LootReport, error) 
 				// Digits span at most ~160px from the icon; wider spans scan into
 				// base buildings, walls, and terrain, producing phantom digits.
 				rect := image.Rect(
-					maxLoc.X+int(4*lr.scale),
-					maxLoc.Y-int(5*lr.scale),
-					maxLoc.X+int(160*lr.scale),
-					maxLoc.Y+tpl.Rows()+int(5*lr.scale),
+					maxLoc.X+int(4*k),
+					maxLoc.Y-int(5*k),
+					maxLoc.X+int(160*k),
+					maxLoc.Y+tpl.Rows()+int(5*k),
 				)
 				results[i] = lr.readRow(screen, rect)
 				continue
 			}
 		}
 		// Fallback ROIs: Inclusive X1=40 to catch the very first digit, bounded at X2=220
-		rect := image.Rect(int(40*lr.scale), int(float64(ic.y1)*lr.scale), int(220*lr.scale), int(float64(ic.y2)*lr.scale))
+		rect := image.Rect(int(40*k), int(float64(ic.y1)*k), int(220*k), int(float64(ic.y2)*k))
 		results[i] = lr.readRow(screen, rect)
 	}
 
@@ -1233,4 +1252,3 @@ func ReadVillageStorageFillMat(screen gocv.Mat, scale float64) VillageResources 
 		DEFillPercent:     calcPct(deFilled, barWidth),
 	}
 }
-

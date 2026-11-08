@@ -187,13 +187,12 @@ func NewSlotManager(
 // `manual_slots.json`'s `slot_xs` are LIVE-frame card CENTRES, one per card
 // position left to right, consumed here verbatim — no scaling. That is worth
 // stating because the values in the file are the whole geometry contract: the
-// list it replaces was authored in the 860-wide reference frame (pitch 73 against
-// a live pitch of ~100) and was then used as live pixels anyway, so its anchors
-// drifted up to 45px off the cards and two of them landed on the same card. They
-// are measured from real 1280x720 battle frames now: card bodies are 88px wide on
-// a ~100px pitch, the first at x 93, and each entry below is a body centre
+// list it replaces was authored for a wider frame and then used as live pixels,
+// so its anchors drifted up to 50px off the cards and the spell probes landed in
+// the gap. Measured on the 860x732 battle frame (2026-11-08): card bodies are
+// ~66px wide, centres 53, 138, 213, 286, 367, 447, each one the body centre
 // cross-checked against that card's count badge (which the game draws
-// right-aligned inside the card, 1-5px in from its right edge).
+// right-aligned inside the card, a few px in from its right edge).
 func (sm *SlotManager) detectActiveSlots(screen gocv.Mat) []int {
 
 	if data, ok := readConfigJSON("manual_slots.json"); ok {

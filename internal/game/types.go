@@ -61,6 +61,7 @@ const (
 	StateConfirmExit
 	StateUpdatePrompt
 	StateOfferPopup
+	StateSearching
 )
 
 var stateNames = map[GameState]string{
@@ -89,6 +90,7 @@ var stateNames = map[GameState]string{
 	StateConnectionLost: "ConnectionLost",
 	StateConfirmExit:    "ConfirmExit",
 	StateUpdatePrompt:   "UpdatePrompt",
+	StateSearching:      "Searching",
 }
 
 func (s GameState) String() string {

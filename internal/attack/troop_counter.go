@@ -240,8 +240,13 @@ const (
 	// Measured at 720p on that bar, whose top edge is bar_y=621: the badge glyphs
 	// occupy y 596..614, i.e. bar_y-25 .. bar_y-7. The band below is that
 	// measurement with slack on both sides.
+	//
+	// 2026 layout (measured live at 860x732, bar_y=632): the `xN` badge moved
+	// INSIDE the card, at its top-right corner — glyphs at y 643..653, i.e.
+	// bar_y+11 .. bar_y+21. The band now reaches bar_y+24 so both layouts read;
+	// the level row (bar_y+68..+80 here) is still well below the band.
 	badgeBandAboveRef = 38.0
-	badgeBandBelowRef = 2.0
+	badgeBandBelowRef = -24.0
 	countBandSlackRef = 9.0
 
 	// The badge font's height window, as a fraction of expectGlyphH (the level

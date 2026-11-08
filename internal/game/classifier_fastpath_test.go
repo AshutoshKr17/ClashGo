@@ -100,8 +100,15 @@ func TestEarlyExitStopsOnADecisiveFrame(t *testing.T) {
 		t.Errorf("early exit scored %d rules, the same as full evaluation; the shortcut never fired",
 			len(early))
 	}
-	if len(early) > 3 {
-		t.Errorf("early exit scored %d rules before stopping; a priority-99 match can only need the other 99s", len(early))
+	top := 0
+	for _, r := range c.GetRules() {
+		if r.Priority == rule.Priority {
+			top++
+		}
+	}
+	if len(early) > top {
+		t.Errorf("early exit scored %d rules before stopping; a priority-%d match can only need the other %d at that priority",
+			len(early), rule.Priority, top)
 	}
 
 	// And the shortcut must still produce the state the full pass produces.

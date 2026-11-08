@@ -77,6 +77,11 @@ var overlayControlProbes = map[GameState][]image.Point{
 	// reference geometry the first candidate reads as bare panel and loses, at
 	// 720p the second does.
 	StateConnectionLost: {image.Pt(303, 451), image.Pt(300, 478)},
+	// Portrait on the bottom-left Return Home button of the matchmaking
+	// screen. Same pixel the classifier rule probes, so the tap only
+	// fires while that button is there. Callers decide WHEN (the screen
+	// is normal for a few seconds; see internal/bot searchScreenStuckAfter).
+	StateSearching: {image.Pt(60, 640)},
 }
 
 // overlayBackStates are the overlays this path closes with the device's Back key,
