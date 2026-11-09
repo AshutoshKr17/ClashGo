@@ -236,3 +236,28 @@ func TestIsUnconfiguredCCSlot(t *testing.T) {
 		t.Fatal("expected isUnconfiguredCCSlot to return false for dark troop card")
 	}
 }
+
+func TestReleaseStackedSieges_UnnamedStackIsATroop(t *testing.T) {
+	stack := &TrackedSlot{TroopSlot: TroopSlot{X: 138, Category: "Siege"}}
+	named := &TrackedSlot{TroopSlot: TroopSlot{X: 200, Category: "Siege"}, UnitName: "stone slammer"}
+	single := &TrackedSlot{TroopSlot: TroopSlot{X: 90, Category: "Siege"}}
+	sm := newTestSlotManager([]*TrackedSlot{stack, named, single})
+	sm.ReleaseStackedSieges(map[int]int{138: 25, 200: 25, 90: 1})
+
+	if stack.Category != "Troop" {
+		t.Fatalf("unnamed stack of 25 stayed %s", stack.Category)
+	}
+	if named.Category != "Siege" {
+		t.Fatal("template-matched siege was released")
+	}
+	if single.Category != "Siege" {
+		t.Fatal("single-count card was released")
+	}
+
+	only := &TrackedSlot{TroopSlot: TroopSlot{X: 138, Category: "Siege"}}
+	sm2 := newTestSlotManager([]*TrackedSlot{only})
+	sm2.ReleaseStackedSieges(map[int]int{138: 25})
+	if got := sm2.GetSlot("stone slammer"); got != nil {
+		t.Fatalf("troop stack still linked as the siege: %+v", got)
+	}
+}

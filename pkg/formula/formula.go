@@ -257,6 +257,66 @@ func (f *Formula) Save(path string) error {
 	return os.WriteFile(path, raw, 0o644)
 }
 
+// SideLine is one corner's deploy line for a unit, in formula-screen pixels.
+type SideLine struct {
+	Corner string
+	P1, P2 Point
+}
+
+// SideLines returns a deploy line on every corner for unit. An authored
+// corner override is used as written; a corner with no override is the
+// BottomRight default reflected the same way MirrorForCorner reflects it.
+// Call this before the orchestrator replaces Units with a single corner.
+func (f *Formula) SideLines(unit string) []SideLine {
+	if f == nil {
+		return nil
+	}
+	key := strings.ToLower(strings.TrimSpace(unit))
+	base, ok := f.Units[key]
+	if !ok || !base.IsLine() || base.P1 == nil || base.P2 == nil {
+		return nil
+	}
+	w, h := f.Screen.W, f.Screen.H
+	if w == 0 {
+		w = 1
+	}
+	if h == 0 {
+		h = 1
+	}
+	var out []SideLine
+	for _, corner := range []string{"TopLeft", "TopRight", "BottomRight", "BottomLeft"} {
+		p1, p2 := *base.P1, *base.P2
+		if ov, ok := f.CornerOverrides[corner]; ok {
+			if e, ok := ov[key]; ok && e.IsLine() && e.P1 != nil && e.P2 != nil {
+				out = append(out, SideLine{Corner: corner, P1: *e.P1, P2: *e.P2})
+				continue
+			}
+		}
+		mx, my := cornerMirror(corner)
+		if mx {
+			p1.X, p2.X = w-p1.X, w-p2.X
+		}
+		if my {
+			p1.Y, p2.Y = h-p1.Y, h-p2.Y
+		}
+		out = append(out, SideLine{Corner: corner, P1: p1, P2: p2})
+	}
+	return out
+}
+
+func cornerMirror(corner string) (mirrorX, mirrorY bool) {
+	switch strings.ToLower(corner) {
+	case "bottomleft", "bl", "bottom_left":
+		return true, false
+	case "topright", "tr", "top_right":
+		return false, true
+	case "topleft", "tl", "top_left":
+		return true, true
+	default:
+		return false, false
+	}
+}
+
 // MirrorForCorner reflects every P / P1 / P2 / Lines[i].P1 / Lines[i].P2
 // across the screen axes as needed so a formula authored for ONE corner
 // (BottomRight by convention) applies to any of the 4 corners. Used by

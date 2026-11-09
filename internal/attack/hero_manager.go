@@ -63,6 +63,11 @@ type HeroManager struct {
 	lastTroopLineP2 image.Point
 	hasTroopLine    bool
 
+	// sideLines holds the four authored deploy lines for the main troops
+	// (balloon, electro dragon). A unit present here is split across those
+	// lines; everything else stays on the single loot corner.
+	sideLines map[string][]formula.SideLine
+
 	// ratioHook, when non-nil, replaces the screen capture inside
 	// captureSlotRatio. Test seam only — nil in production.
 	ratioHook func() (float64, bool)
@@ -116,6 +121,37 @@ func NewHeroManager(
 // The dynamic V2 orchestrator leaves it off: abilities run in the dedicated
 // "Abilities" phase, after spells. Only the hero-phase bulk-activation path
 // (attack.go) opts in.
+// SetSideLines installs the four-corner lines for the main troops.
+func (hm *HeroManager) SetSideLines(m map[string][]formula.SideLine) {
+	hm.sideLines = m
+}
+
+// deployAcrossSides splits count taps across the unit's corner lines, one
+// extra tap to the first corners when the count does not divide evenly.
+func (hm *HeroManager) deployAcrossSides(lines []formula.SideLine, count, jitter int) {
+	if count <= 0 || len(lines) == 0 {
+		return
+	}
+	base := count / len(lines)
+	extra := count % len(lines)
+	for i, ln := range lines {
+		n := base
+		if i < extra {
+			n++
+		}
+		if n == 0 {
+			continue
+		}
+		hm.logger.Info().
+			Str("corner", ln.Corner).
+			Int("taps", n).
+			Interface("p1", ln.P1).
+			Interface("p2", ln.P2).
+			Msg("dropping troop line on side")
+		hm.executor.TapDeployLine(ln.P1.Image(), ln.P2.Image(), n, jitter)
+	}
+}
+
 func (hm *HeroManager) SetActivateAbility(v bool) {
 	hm.activateAbility = v
 }
@@ -1029,11 +1065,17 @@ func (hm *HeroManager) DeployTroops(
 	}
 
 	var p1, p2 image.Point
-	// geometry sourcing: the user's pins, else the strategy formula, else the
-	// legacy edge pin. See SetPinnedGround for why the pins outrank the formula.
+	// geometry sourcing: all four authored sides for the main troops, else the
+	// user's pins, else the strategy formula, else the legacy edge pin.
 	src := "edge"
 	hasFormula := false
-	if hm.pinnedGround && len(hm.deployLine.Points) >= 2 {
+	sides := hm.sideLines[unitName]
+	if len(sides) >= 2 {
+		p1 = sides[0].P1.Image()
+		p2 = sides[0].P2.Image()
+		src = "all-sides"
+		hasFormula = true
+	} else if hm.pinnedGround && len(hm.deployLine.Points) >= 2 {
 		p1 = hm.deployLine.Points[0]
 		p2 = hm.deployLine.Points[len(hm.deployLine.Points)-1]
 		src = "pin"
@@ -1052,7 +1094,7 @@ func (hm *HeroManager) DeployTroops(
 			hasFormula = false
 		}
 	}
-	if hasFormula {
+	if hasFormula && src != "all-sides" {
 		src = "formula"
 	}
 	if !hasFormula && hm.hasTroopLine && (strings.Contains(unitName, "dragon") || strings.Contains(unitName, "edrag")) {
@@ -1073,7 +1115,15 @@ func (hm *HeroManager) DeployTroops(
 
 	// Remember this pass's ground for the hero phase that follows: these taps
 	// were accepted by the game moments ago (see hero_manager.go's troopGround).
-	hm.recordGround(p1, p2)
+	if len(sides) >= 2 {
+		pts := make([]image.Point, 0, len(sides)*2)
+		for _, ln := range sides {
+			pts = append(pts, ln.P1.Image(), ln.P2.Image())
+		}
+		hm.recordGround(pts...)
+	} else {
+		hm.recordGround(p1, p2)
+	}
 
 	// The fresh pre-deploy read is only worth its ~300ms when nothing
 	// trustworthy already measured this card. The orchestrator reads the whole
@@ -1113,9 +1163,12 @@ func (hm *HeroManager) DeployTroops(
 	}
 
 	var deployed func(int, int)
-	if p1 == p2 {
+	switch {
+	case len(sides) >= 2:
+		deployed = func(c, j int) { hm.deployAcrossSides(sides, c, j) }
+	case p1 == p2:
 		deployed = func(c, j int) { hm.executor.TapDeployPoint(p1, c, j) }
-	} else {
+	default:
 		deployed = func(c, j int) { hm.executor.TapDeployLine(p1, p2, c, j) }
 	}
 	if src != "edge" {
@@ -1124,6 +1177,7 @@ func (hm *HeroManager) DeployTroops(
 			Str("src", src).
 			Int("count", tapCount).
 			Bool("count_measured", tapCountMeasured).
+			Int("sides", len(sides)).
 			Int("live_count", preCount).
 			Bool("live_count_trusted", preTrusted).
 			Int("detected_count", detectedCount).
@@ -1531,6 +1585,7 @@ func (hm *HeroManager) liveCountAndEmpty(slot *TrackedSlot) (int, bool, bool) {
 //     It is deliberately small and labelled `count_read_trusted=false` in
 //     the log so it can never be mistaken for a measurement; the reconcile
 //     loop is what guarantees the card actually drains.
+//
 // resolveLiveTapCount is the measurement-blind entry point: the count alone.
 // Kept for callers (and tests) that do not care how the number was obtained.
 func (hm *HeroManager) resolveLiveTapCount(unit strategy.Unit, slot *TrackedSlot, liveCount int, liveTrusted bool, detectedCount int) int {

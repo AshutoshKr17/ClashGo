@@ -1893,6 +1893,71 @@ func (e *Executor) endButtonVisible(screen gocv.Mat, sCfg StallConfig) bool {
 	return reds >= minRed
 }
 
+// surrenderRed is the saturated red of the Surrender / End Battle face.
+func surrenderRed(r, g, b byte) bool {
+	return r > 160 && g < 90 && b < 90
+}
+
+// findSurrenderButton locates the red Surrender button in the bottom-left
+// HUD. The stall probe is one anchored patch and misses the button when the
+// label or a layout shift puts that patch on the white caption. The search
+// uses the button's own pixels.
+func findSurrenderButton(screen gocv.Mat) (image.Point, bool) {
+	if screen.Empty() {
+		return image.Point{}, false
+	}
+	h, w := screen.Rows(), screen.Cols()
+	y0, y1 := h-160, h-80
+	if y0 < 0 {
+		y0 = 0
+	}
+	if y1 <= y0 {
+		return image.Point{}, false
+	}
+	x1 := 220
+	if x1 > w {
+		x1 = w
+	}
+	n, sx, sy := 0, 0, 0
+	for y := y0; y < y1; y++ {
+		for x := 0; x < x1; x++ {
+			b := screen.GetUCharAt(y, x*3)
+			g := screen.GetUCharAt(y, x*3+1)
+			r := screen.GetUCharAt(y, x*3+2)
+			if !surrenderRed(r, g, b) {
+				continue
+			}
+			n++
+			sx += x
+			sy += y
+		}
+	}
+	// A real button is a solid red plate. A handful of red pixels is a roof
+	// or a decoration, and tapping that would hit the map.
+	if n < 80 {
+		return image.Point{}, false
+	}
+	return image.Pt(sx/n, sy/n), true
+}
+
+// pressSurrender taps the located Surrender button and the confirm dialog.
+func (e *Executor) pressSurrender(pt image.Point, sCfg StallConfig) {
+	if err := e.client.TapHuman(pt.X, pt.Y, 5.0); err != nil {
+		e.logger.Warn().Err(err).Msg("Surrender tap failed")
+		return
+	}
+	time.Sleep(120 * time.Millisecond)
+	okX, okY := e.cal.Centre(520, 430)
+	if sCfg.RefWidth != 0 {
+		okX, okY = e.cal.AnchorPoint(sCfg.ConfirmBtn.X, sCfg.ConfirmBtn.Y, game.AnchorCenter)
+		e.logger.Info().Int("x", okX).Int("y", okY).Msg("pressing Surrender confirm")
+	}
+	if err := e.client.TapHuman(okX, okY, 5.0); err != nil {
+		e.logger.Warn().Err(err).Msg("Surrender confirm tap failed")
+	}
+	time.Sleep(120 * time.Millisecond)
+}
+
 func (e *Executor) WaitForBattleEndCtx(ctx context.Context, timeout time.Duration) bool {
 	deadline := time.Now().Add(timeout)
 	ticker := time.NewTicker(1000 * time.Millisecond)
@@ -1910,9 +1975,6 @@ func (e *Executor) WaitForBattleEndCtx(ctx context.Context, timeout time.Duratio
 	var lastSpeedUpTap time.Time
 	stallSec := resolveStallTimerSeconds(e.cfg, e.activeStrategy)
 	stallLimit := time.Duration(stallSec) * time.Second
-	// Consecutive no-progress stalls in this battle, used to throttle the
-	// "keeping battle alive" log to one Warn per stall episode.
-	stallEpisodes := 0
 
 	var sCfg StallConfig
 	hasStallROI := false
@@ -2092,7 +2154,6 @@ func (e *Executor) WaitForBattleEndCtx(ctx context.Context, timeout time.Duratio
 					if currentPct > lastPct {
 						lastPct = currentPct
 						lastPctTime = time.Now()
-						stallEpisodes = 0
 						e.logger.Info().Int("percent", currentPct).Msg("destruction increased, resetting stall timer")
 					} else {
 						elapsed := time.Since(lastPctTime)
@@ -2102,19 +2163,21 @@ func (e *Executor) WaitForBattleEndCtx(ctx context.Context, timeout time.Duratio
 							// ending blind would tap the map, and the "stall" may
 							// be a HUD/OCR artifact rather than a dead army.
 							if !e.endButtonVisible(screen, sCfg) {
-								// Log once per stall episode, then drop to Debug. A
-								// battle whose result overlay the classifier cannot
-								// read yet (or a destruction ROI that reads a stuck
-								// 0%) repeats this branch every stallLimit until the
-								// deadline, and a Warn per tick buries the log for the
-								// whole 4-minute wait without adding information.
-								stallEpisodes++
-								if stallEpisodes == 1 {
-									e.logger.Warn().Int("last_pct", lastPct).Msg("stall detected but End Battle button not visible; keeping battle alive (further repeats at debug level)")
+								// The anchored probe missed the button. The 2026
+								// battle HUD labels it Surrender and it sits a few
+								// pixels off the old End Battle pin, so a stall used
+								// to wait out the whole deadline. Locate the red
+								// button and press it; fall back to the pin if the
+								// search finds nothing.
+								if pt, ok := findSurrenderButton(screen); ok {
+									e.logger.Warn().Int("last_pct", lastPct).Int("x", pt.X).Int("y", pt.Y).Msg("stall detected; pressing Surrender")
+									e.pressSurrender(pt, sCfg)
 								} else {
-									e.logger.Debug().Int("last_pct", lastPct).Int("episode", stallEpisodes).Msg("stall repeated; End Battle button still not visible")
+									e.logger.Warn().Int("last_pct", lastPct).Msg("stall detected; Surrender button not located, tapping the calibrated End Battle point")
+									e.EndBattle()
 								}
-								lastPctTime = time.Now()
+								screen.Close()
+								return true
 							} else {
 								e.logger.Warn().Int("last_pct", lastPct).Dur("elapsed", elapsed).Msg("stall detected, ending battle!")
 								screen.Close()

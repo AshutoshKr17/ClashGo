@@ -1628,27 +1628,6 @@ func (b *Bot) executeAttackSequence(gc *game.GameContext) {
 		return
 	}
 
-	// Inter-attack cooldown. Armies need real time to retrain; without a
-	// gate the bot re-attacked ~8s after every Return Home with whatever
-	// the camps held (observed live: three near-identical defeats in <4
-	// minutes). min_seconds_between_attacks is the human-real pause;
-	// waiting inside the sequence goroutine (seqRunning is already held)
-	// keeps the capture loop from starting a second sequence meanwhile.
-	gap := time.Duration(b.cfg.Attack.MinSecondsBetweenAttacks) * time.Second
-	if gap > 0 && !b.lastAttackEnd.IsZero() {
-		if wait := gap - time.Since(b.lastAttackEnd); wait > 0 {
-			b.logger.Info().
-				Dur("wait", wait).
-				Int("min_gap_s", b.cfg.Attack.MinSecondsBetweenAttacks).
-				Msg("waiting out inter-attack cooldown before next search")
-			select {
-			case <-time.After(wait):
-			case <-b.ctx.Done():
-				return
-			}
-		}
-	}
-
 	// Scheduler authorization gate
 	if b.scheduler != nil {
 		if allowed, reason := b.scheduler.CanAttack(time.Now()); !allowed {
@@ -2046,8 +2025,8 @@ func (b *Bot) executeAttackSequence(gc *game.GameContext) {
 		// "any field non-zero" shortcut
 		// accepted the star emblem's paint frame — seconds before the loot
 		// and bonus counters ran — and locked in a 2-star victory as 0
-		// loot / 0 bonus.
-		b.client.JitteredSleep(1800 * time.Millisecond)
+		// loot / 0 bonus. The settle loop below is the wait; it returns as
+		// soon as the read holds still.
 
 		// Authoritative star signal: the destruction percentage the battle
 		// wait sampled from the stall ROI (proven live: valk runs tracked

@@ -175,25 +175,22 @@ type AttackConfig struct {
 	// stops it. The GUI has one Start button and one Stop button, so unlimited is
 	// what those two imply — the cap is opt-in, and only a positive value ever
 	// ends a session without the user asking.
-	MaxAttackPerSession int      `json:"max_attack_per_session"`
-	DropDelay           Duration `json:"drop_delay"`
-	SpellDelay          Duration `json:"spell_delay"`
-	EndBattleDelay      Duration `json:"end_battle_delay"`
-	UseQueen            bool     `json:"use_queen"`
-	UseWarden           bool     `json:"use_warden"`
-	UseClanCastle       bool     `json:"use_clan_castle"`
-	QueenChargeAtPct    int      `json:"queen_charge_at_pct"`
-	WardenUseAtPct      int      `json:"warden_use_at_pct"`
-	ReserveDEPercent    int      `json:"reserve_de_percent"`
-	StallTimerSeconds   int            `json:"stall_timer_seconds"`
-	StrategySlots       map[string]int `json:"strategy_slots,omitempty"`
+	MaxAttackPerSession int             `json:"max_attack_per_session"`
+	DropDelay           Duration        `json:"drop_delay"`
+	SpellDelay          Duration        `json:"spell_delay"`
+	EndBattleDelay      Duration        `json:"end_battle_delay"`
+	UseQueen            bool            `json:"use_queen"`
+	UseWarden           bool            `json:"use_warden"`
+	UseClanCastle       bool            `json:"use_clan_castle"`
+	QueenChargeAtPct    int             `json:"queen_charge_at_pct"`
+	WardenUseAtPct      int             `json:"warden_use_at_pct"`
+	ReserveDEPercent    int             `json:"reserve_de_percent"`
+	StallTimerSeconds   int             `json:"stall_timer_seconds"`
+	StrategySlots       map[string]int  `json:"strategy_slots,omitempty"`
 	StrategyAutoEnd     map[string]bool `json:"strategy_auto_end,omitempty"`
-	// MinSecondsBetweenAttacks is the minimum pause between the end of one
-	// battle (Return Home) and the start of the next attack sequence.
-	// Armies take real time to retrain; without this gate the bot attacked
-	// back-to-back ~8s apart with whatever the camps held (observed live:
-	// three near-identical defeats in under four minutes). 0 disables the
-	// pause.
+	// MinSecondsBetweenAttacks is kept so older config files still parse.
+	// The attack sequence does not wait on it: the next search starts as
+	// soon as the previous battle has returned home.
 	MinSecondsBetweenAttacks int `json:"min_seconds_between_attacks"`
 }
 
@@ -350,7 +347,7 @@ func DefaultConfig() *BotConfig {
 			WardenUseAtPct:           30,
 			ReserveDEPercent:         200,
 			StallTimerSeconds:        30,
-			MinSecondsBetweenAttacks: 30,
+			MinSecondsBetweenAttacks: 0,
 		},
 		Search: SearchConfig{
 			Enabled:              true,

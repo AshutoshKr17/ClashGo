@@ -59,14 +59,17 @@ const (
 	maxLeagueBonusElixir     = 1_000_000
 	maxLeagueBonusDarkElixir = 100_000
 
-	// resultSettleAttempts and resultPanelMinObserve must allow a result read
-	// beyond the latest measured bonus-count animation (8 s), then confirm it
-	// again. At 400 ms cadence this allows about 11 s of observation.
-	resultSettleAttempts = 28
+	// resultSettleAttempts is the cap on how long a panel that never settles
+	// may hold the attack. At the 400 ms cadence, 16 attempts is about 6 s:
+	// long enough for the star emblem and the loot rows (stable by ~2 s) and
+	// short of the old 11 s hold.
+	resultSettleAttempts = 16
 
-	// Never accept a stable-looking result before every bonus counter had time
-	// to animate. This exceeds the latest measured 8 s delay with 2 s margin.
-	resultPanelMinObserve = 10 * time.Second
+	// Stars and the loot rows are painted within the first two seconds. The
+	// league-bonus column can still be counting; a read is not final until
+	// this window has passed AND two captures agree, so a half-drawn star
+	// frame is not banked, but the attack no longer sits out a flat 10 s.
+	resultPanelMinObserve = 2 * time.Second
 
 	// resultZeroStableCaptures is how many consecutive identical PANEL
 	// frames an all-zero read must show before it is believed.

@@ -136,7 +136,7 @@ func TestResolveEndAtPercent_ValkDefaultsAndOverrides(t *testing.T) {
 
 func TestResolveStallTimerSeconds(t *testing.T) {
 	cfg := &config.AttackConfig{StallTimerSeconds: 30}
-	
+
 	// 1. Without strategy override, uses config value
 	stratNoOverride := &strategy.DynamicStrategy{Name: "Generic"}
 	if got := resolveStallTimerSeconds(cfg, stratNoOverride); got != 30 {
@@ -546,6 +546,33 @@ func TestEndButtonVisible_AgreesWithTheTapPointAt720p(t *testing.T) {
 		if got != tc.want {
 			t.Errorf("endButtonVisible(%s) = %v, want %v (%s)", tc.fixture, got, tc.want, tc.note)
 		}
+	}
+}
+
+func TestFindSurrenderButton(t *testing.T) {
+	img := gocv.NewMatWithSize(732, 860, gocv.MatTypeCV8UC3)
+	defer img.Close()
+	img.SetTo(gocv.NewScalar(40, 120, 40, 0))
+
+	btn := img.Region(image.Rect(16, 598, 121, 612))
+	btn.SetTo(gocv.NewScalar(40, 40, 210, 0)) // BGR red
+	btn.Close()
+
+	pt, ok := findSurrenderButton(img)
+	if !ok {
+		t.Fatal("Surrender button not found")
+	}
+	if pt.X < 16 || pt.X > 121 || pt.Y < 598 || pt.Y > 612 {
+		t.Fatalf("Surrender point %v is outside the button", pt)
+	}
+
+	// A few red pixels are not a button.
+	img.SetTo(gocv.NewScalar(40, 120, 40, 0))
+	speck := img.Region(image.Rect(30, 600, 40, 606))
+	speck.SetTo(gocv.NewScalar(40, 40, 210, 0))
+	speck.Close()
+	if _, ok := findSurrenderButton(img); ok {
+		t.Fatal("a speck of red was taken as the Surrender button")
 	}
 }
 

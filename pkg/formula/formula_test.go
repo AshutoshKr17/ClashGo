@@ -8,6 +8,38 @@ import (
 	"testing"
 )
 
+func TestSideLinesUsesAuthoredCorner(t *testing.T) {
+	f := &Formula{
+		Screen: ScreenSize{W: 860, H: 732},
+		Units: map[string]UnitEntry{
+			"balloon": {Type: "line", P1: &Point{X: 547, Y: 581}, P2: &Point{X: 726, Y: 442}},
+		},
+		CornerOverrides: map[string]map[string]UnitEntry{
+			"BottomLeft": {"balloon": {Type: "line", P1: &Point{X: 81, Y: 397}, P2: &Point{X: 289, Y: 562}}},
+		},
+	}
+	lines := f.SideLines("Balloon")
+	if len(lines) != 4 {
+		t.Fatalf("sides = %d, want 4", len(lines))
+	}
+	by := map[string]SideLine{}
+	for _, ln := range lines {
+		by[ln.Corner] = ln
+	}
+	if by["BottomLeft"].P1.X != 81 {
+		t.Errorf("BottomLeft x=%d, want authored 81", by["BottomLeft"].P1.X)
+	}
+	if by["BottomRight"].P1.X != 547 {
+		t.Errorf("BottomRight x=%d, want 547", by["BottomRight"].P1.X)
+	}
+	if by["TopRight"].P1.Y != 732-581 {
+		t.Errorf("TopRight y=%d, want mirrored %d", by["TopRight"].P1.Y, 732-581)
+	}
+	if by["TopLeft"].P1.X != 860-547 || by["TopLeft"].P1.Y != 732-581 {
+		t.Errorf("TopLeft = %+v, want both axes mirrored", by["TopLeft"].P1)
+	}
+}
+
 func TestMirrorForCorner_NilFormulaNoPanic(t *testing.T) {
 	var f *Formula
 	f.MirrorForCorner("BottomLeft") // must not panic

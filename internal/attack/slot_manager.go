@@ -538,6 +538,35 @@ func (sm *SlotManager) GetSlot(unitName string) *TrackedSlot {
 	return sm.fallbackSpellSlot(n)
 }
 
+// ReleaseStackedSieges turns an unnamed "siege" card back into a troop when the
+// count badge shows a stack.
+//
+// The bar has no siege template for most armies, so the last unidentified card
+// before the first hero is labelled Siege. That is right for a single machine
+// and wrong for a second troop: live 2026-11-09 the card at x=138 read 25, the
+// siege phase tapped it once, and the sweep then skipped it because a siege is
+// one placement. A siege machine does not carry a stack badge above 1, so a
+// trusted count above 1 is a troop card and the sweep deploys the whole stack.
+// A named siege (template match) is left alone even if its count looks high.
+func (sm *SlotManager) ReleaseStackedSieges(counts map[int]int) {
+	if sm == nil {
+		return
+	}
+	for _, slot := range sm.slots {
+		if slot == nil || slot.UnitName != "" || slot.Category != "Siege" {
+			continue
+		}
+		if counts[slot.X] <= 1 {
+			continue
+		}
+		slot.Category = "Troop"
+		sm.logger.Info().
+			Int("x", slot.X).
+			Int("count", counts[slot.X]).
+			Msg("unnamed card before the heroes holds a troop stack, not a siege; the sweep will deploy all of it")
+	}
+}
+
 // fallbackSiegeSlot returns the Clan Castle or Siege slot on the troop bar.
 // A CoC army has at most ONE CC/Siege slot. If the strategy asks for a siege
 // machine (e.g. "stone slammer") or "clan castle", but template matching

@@ -1181,6 +1181,45 @@ func TestConfirmButtonDrawnNeedsGreenFaceAndCaption(t *testing.T) {
 	}
 }
 
+// TestFindConfirmButtonLocatesTheGreenFaceAboveTheMappedRect is the live
+// 860x732 miss: the mapped box holds the dialog's white caption and the green
+// Upgrade face sits above it. The tap has to land on that face, and a gold
+// tray chip in the same neighbourhood must not be taken for the confirm.
+func TestFindConfirmButtonLocatesTheGreenFaceAboveTheMappedRect(t *testing.T) {
+	frame := gocv.NewMatWithSize(testFrameH, testFrameW, gocv.MatTypeCV8UC3)
+	defer frame.Close()
+	frame.SetTo(gocv.NewScalar(60, 60, 60, 0))
+
+	// White caption inside the mapped box, the state the live frames report
+	// (bright, almost no green). Not itself a button.
+	gocv.Rectangle(&frame, testConfirmRect.ImageRect(), color.RGBA{255, 255, 255, 255}, -1)
+	if drawn, _, _ := confirmButtonDrawn(frame, testConfirmRect); drawn {
+		t.Fatal("caption alone must not count as the confirm control")
+	}
+
+	face := image.Rect(40, 200, 110, 240) // above the mapped box, wide and green
+	gocv.Rectangle(&frame, face, confirmFaceGreen, -1)
+	// A gold tray chip beside it, narrower than the confirm face.
+	gocv.Rectangle(&frame, image.Rect(120, 250, 160, 300), goldChipFace, -1)
+
+	pt, ok := findConfirmButton(frame, testConfirmRect)
+	if !ok {
+		t.Fatal("green Upgrade face above the mapped rect was not located")
+	}
+	want := image.Pt(face.Min.X+face.Dx()/2, face.Min.Y+face.Dy()/2)
+	if dx, dy := pt.X-want.X, pt.Y-want.Y; dx > 3 || dx < -3 || dy > 3 || dy < -3 {
+		t.Fatalf("tap (%d,%d) is off the green face centre %v", pt.X, pt.Y, want)
+	}
+
+	goldOnly := gocv.NewMatWithSize(testFrameH, testFrameW, gocv.MatTypeCV8UC3)
+	defer goldOnly.Close()
+	goldOnly.SetTo(gocv.NewScalar(60, 60, 60, 0))
+	gocv.Rectangle(&goldOnly, image.Rect(40, 200, 110, 240), goldChipFace, -1)
+	if _, ok := findConfirmButton(goldOnly, testConfirmRect); ok {
+		t.Fatal("a gold tray chip was accepted as the confirm button")
+	}
+}
+
 // TestWallLoopChromeAltRectIsNotAPopup is the regression test for the other half
 // of the live failure: x_popup_roi_alt maps onto this client's resource HUD, so
 // brightness alone read alt_up with alt_px=151 on every verify and turned BOTH

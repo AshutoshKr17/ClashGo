@@ -620,6 +620,9 @@ func (e *Executor) DeployDynamicV2(s *strategy.DynamicStrategy, screen gocv.Mat,
 		Interface("counts", countMap).
 		Int("frames", len(countFrames)).
 		Msg("detected troop counts")
+	// A second troop card sitting in the siege position (last unidentified
+	// slot before the heroes) must be deployed as a stack, not as one siege tap.
+	slotMgr.ReleaseStackedSieges(countMap)
 
 	// When the merged read still cannot settle every card, the pixels are the
 	// only thing that can explain why, and the frame is gone a second later. Save

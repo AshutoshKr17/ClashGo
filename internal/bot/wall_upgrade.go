@@ -802,12 +802,32 @@ func RunWallUpgradeLoop(h *WallUpgradeHooks) {
 					break
 				}
 				confirmDrawn, confirmBright, confirmGreen := confirmButtonDrawn(pageScreen, confirmRect)
+				tapX, tapY := ccx, ccy
+				// The mapped box still catches the dialog's white caption on this
+				// client (bright ~1840, the measured confirm-page signature) while
+				// the green Upgrade face has slid out of it (green ~220). Tapping
+				// the box centre then hits the village and the selection resets.
+				// The face is located in the frame instead; the box is only used
+				// when the face is actually drawn inside it.
+				if !confirmDrawn {
+					if pt, ok := findConfirmButton(pageScreen, confirmRect); ok {
+						tapX, tapY = pt.X, pt.Y
+						confirmDrawn = true
+						h.Logger.Info().
+							Int("x", tapX).Int("y", tapY).
+							Int("confirm_bright", confirmBright).
+							Int("confirm_green", confirmGreen).
+							Str("button", btn.name).
+							Msg("mapped confirm rect missed the green Upgrade button; tapping the one located in the frame")
+					}
+				}
 				h.stepScreen("asset_driven_confirm_page", pageScreen, map[string]any{
 					"name":           btn.name,
 					"confirm_drawn":  confirmDrawn,
 					"confirm_bright": confirmBright,
 					"confirm_green":  confirmGreen,
 					"confirm_rect":   confirmRect.ImageRect(),
+					"tap":            []int{tapX, tapY},
 				})
 				pageScreen.Close()
 
@@ -826,14 +846,14 @@ func RunWallUpgradeLoop(h *WallUpgradeHooks) {
 					continue
 				}
 
-				// Confirm tap. The mapped centre is used as-is now that the
-				// frame proves the control is drawn there; the post-tap
-				// capture below decides success-vs-popup.
+				// Confirm tap. Mapped centre when the face is inside the box,
+				// otherwise the green button located above. The post-tap
+				// capture decides success-vs-popup.
 				h.step("asset_driven_tap_confirm", map[string]any{
-					"name": btn.name, "x": ccx, "y": ccy,
+					"name": btn.name, "x": tapX, "y": tapY,
 					"confirm_rect": confirmRect.ImageRect(),
 				})
-				if err := h.Client.Tap(ccx, ccy); err != nil {
+				if err := h.Client.Tap(tapX, tapY); err != nil {
 					h.Logger.Error().Err(err).Msg("asset-driven confirm tap failed")
 					h.step("asset_driven_confirm_tap_failed", map[string]any{
 						"name": btn.name, "err": err.Error(),
@@ -2020,6 +2040,33 @@ func confirmButtonDrawn(screen gocv.Mat, confirm Rect) (drawn bool, bright, gree
 	bright = modalBrightPixelsIn(screen, confirm)
 	green = greenFacePixelsIn(screen, confirm)
 	return bright >= confirmBrightMin && green >= confirmGreenMin, bright, green
+}
+
+// findConfirmButton locates the green Upgrade button when the mapped confirm
+// rect no longer covers it. The dialog reflows: on the live 860x732 frames the
+// rect still holds the white caption (bright ~1840) while the green face sits
+// above it (green ~220 inside the rect). The search stays a neighbourhood of
+// that rect, so a village Attack button elsewhere cannot win, and only a green
+// face is accepted — the tray's gold and elixir chips share the neighbourhood
+// and must not be tapped as the confirm.
+func findConfirmButton(screen gocv.Mat, confirm Rect) (image.Point, bool) {
+	r := confirm.ImageRect()
+	if r.Empty() || screen.Cols() == 0 || screen.Rows() == 0 {
+		return image.Point{}, false
+	}
+	window := image.Rect(r.Min.X-180, r.Min.Y-180, r.Max.X+180, r.Max.Y+80)
+	window = window.Intersect(image.Rect(0, 0, screen.Cols(), screen.Rows()))
+	if window.Dx() < 8 || window.Dy() < 8 {
+		return image.Point{}, false
+	}
+	cfg := vision.DefaultActionButtonConfig()
+	cfg.MinAspect = 1.3
+	cfg.MinFrameWidthFrac = 0.08
+	btn, ok := vision.FindActionButton(screen, window, cfg)
+	if !ok || btn.Color != vision.ButtonGreen {
+		return image.Point{}, false
+	}
+	return btn.Centre(), true
 }
 
 // wallTrayChipConfig bounds the search for a wall-upgrade tray chip. The tray's

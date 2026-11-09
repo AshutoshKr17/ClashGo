@@ -69,9 +69,12 @@ func TestResultSettleAcceptsStableResultAfterLateLeagueBonus(t *testing.T) {
 	}
 
 	_, accepted, got := runSettle(t, frames)
-	wantAccepted := len(frames) - 1
+	// The second frame of the finished panel. The flat 10 s hold used to
+	// push acceptance to the final capture; stars and loot are trusted once
+	// the bonus has landed and two reads agree.
+	const wantAccepted = 8
 	if accepted != wantAccepted {
-		t.Fatalf("accepted capture %d, want the last one (%d)", accepted, wantAccepted)
+		t.Fatalf("accepted capture %d, want %d (the second stable complete panel)", accepted, wantAccepted)
 	}
 	if got != final {
 		t.Errorf("accepted %+v, want %+v", got, final)

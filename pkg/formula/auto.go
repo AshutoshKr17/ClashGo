@@ -278,6 +278,23 @@ func scalePoint(p *Point, sX, sY float64) {
 // any dimension or k is non-positive. The src == dst guard matters: formulas
 // written by cmd/design_attack carry the live screen size, and re-scaling them
 // by the device's k would multiply them for a second time.
+// ProjectSides applies the same uniform projection as ProjectUniform to
+// lines captured before the formula's units were replaced by one corner.
+func ProjectSides(lines []SideLine, k float64, srcW, srcH, dstW, dstH int) {
+	if k <= 0 || math.IsNaN(k) || math.IsInf(k, 0) {
+		return
+	}
+	if srcW <= 0 || srcH <= 0 || dstW <= 0 || dstH <= 0 || (srcW == dstW && srcH == dstH) {
+		return
+	}
+	for i := range lines {
+		p1, p2 := lines[i].P1, lines[i].P2
+		projectPoint(&p1, k, srcW, srcH, dstW, dstH)
+		projectPoint(&p2, k, srcW, srcH, dstW, dstH)
+		lines[i].P1, lines[i].P2 = p1, p2
+	}
+}
+
 func (f *Formula) ProjectUniform(k float64, srcW, srcH, dstW, dstH int) {
 	if f == nil || k <= 0 || math.IsNaN(k) || math.IsInf(k, 0) {
 		return
