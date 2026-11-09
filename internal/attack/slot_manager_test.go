@@ -239,25 +239,53 @@ func TestIsUnconfiguredCCSlot(t *testing.T) {
 
 func TestReleaseStackedSieges_UnnamedStackIsATroop(t *testing.T) {
 	stack := &TrackedSlot{TroopSlot: TroopSlot{X: 138, Category: "Siege"}}
-	named := &TrackedSlot{TroopSlot: TroopSlot{X: 200, Category: "Siege"}, UnitName: "stone slammer"}
-	single := &TrackedSlot{TroopSlot: TroopSlot{X: 90, Category: "Siege"}}
-	sm := newTestSlotManager([]*TrackedSlot{stack, named, single})
-	sm.ReleaseStackedSieges(map[int]int{138: 25, 200: 25, 90: 1})
+	named := &TrackedSlot{TroopSlot: TroopSlot{X: 53, Category: "Siege"}, UnitName: "stone slammer", Confidence: 0.59}
+	falseHero := &TrackedSlot{TroopSlot: TroopSlot{X: 200, Category: "Hero"}, UnitName: "archer queen", Confidence: 0.55}
+	single := &TrackedSlot{TroopSlot: TroopSlot{X: 90, Category: "Siege"}, UnitName: "stone slammer"}
+	warden := &TrackedSlot{TroopSlot: TroopSlot{X: 213, Category: "Hero"}, UnitName: "grand warden", Confidence: 0.92}
+	rage := &TrackedSlot{TroopSlot: TroopSlot{X: 286, Category: "Spell"}, UnitName: "rage spell", Confidence: 0.97}
+	sm := newTestSlotManager([]*TrackedSlot{stack, named, falseHero, single, warden, rage})
+	sm.ReleaseStackedSieges(map[int]int{138: 25, 53: 17, 200: 25, 90: 1, 213: 0, 286: 5})
 
 	if stack.Category != "Troop" {
 		t.Fatalf("unnamed stack of 25 stayed %s", stack.Category)
 	}
-	if named.Category != "Siege" {
-		t.Fatal("template-matched siege was released")
+	if named.Category != "Troop" || named.UnitName != "" {
+		t.Fatalf("x17 stone slammer stayed %s %q", named.Category, named.UnitName)
 	}
-	if single.Category != "Siege" {
-		t.Fatal("single-count card was released")
+	if falseHero.Category != "Troop" || falseHero.UnitName != "" {
+		t.Fatalf("x25 archer queen stayed %s %q", falseHero.Category, falseHero.UnitName)
 	}
+	if single.Category != "Siege" || single.UnitName != "stone slammer" {
+		t.Fatal("count-1 siege was released")
+	}
+	if warden.Category != "Hero" || warden.UnitName != "grand warden" {
+		t.Fatal("real hero with no badge was released")
+	}
+	if rage.Category != "Spell" || rage.UnitName != "rage spell" {
+		t.Fatal("rage stack was released")
+	}
+	if got := sm.GetSlot("stone slammer"); got != single {
+		t.Fatalf("GetSlot(stone slammer) = %v, want the count-1 siege", got)
+	}
+	if got := sm.GetSlot("archer queen"); got != nil {
+		t.Fatalf("troop stack still linked as the queen: %+v", got)
+	}
+	if got := sm.GetSlot("grand warden"); got != warden {
+		t.Fatal("warden lookup broke")
+	}
+}
 
-	only := &TrackedSlot{TroopSlot: TroopSlot{X: 138, Category: "Siege"}}
-	sm2 := newTestSlotManager([]*TrackedSlot{only})
-	sm2.ReleaseStackedSieges(map[int]int{138: 25})
-	if got := sm2.GetSlot("stone slammer"); got != nil {
-		t.Fatalf("troop stack still linked as the siege: %+v", got)
+func TestUnnamedTroopStacks_OnlyTheUnnamedStack(t *testing.T) {
+	stack := &TrackedSlot{TroopSlot: TroopSlot{X: 53, Category: "Troop"}}
+	named := &TrackedSlot{TroopSlot: TroopSlot{X: 138, Category: "Troop"}, UnitName: "electro dragon"}
+	hero := &TrackedSlot{TroopSlot: TroopSlot{X: 213, Category: "Hero"}, UnitName: "grand warden"}
+	one := &TrackedSlot{TroopSlot: TroopSlot{X: 90, Category: "Troop"}}
+	spell := &TrackedSlot{TroopSlot: TroopSlot{X: 286, Category: "Spell"}, UnitName: "rage spell"}
+	sm := newTestSlotManager([]*TrackedSlot{stack, named, hero, one, spell})
+
+	got := sm.UnnamedTroopStacks(map[int]int{53: 17, 138: 25, 90: 1, 286: 5})
+	if len(got) != 1 || got[0] != stack {
+		t.Fatalf("unnamed stacks = %v, want the x=53 card only", got)
 	}
 }

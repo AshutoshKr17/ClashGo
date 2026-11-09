@@ -1220,6 +1220,119 @@ func TestFindConfirmButtonLocatesTheGreenFaceAboveTheMappedRect(t *testing.T) {
 	}
 }
 
+func TestConfirmTapPointIgnoresGreenWhenTheDialogIsGone(t *testing.T) {
+	frame := gocv.NewMatWithSize(testFrameH, testFrameW, gocv.MatTypeCV8UC3)
+	defer frame.Close()
+	frame.SetTo(gocv.NewScalar(60, 60, 60, 0))
+	// A green face and no white caption in the confirm box. That is the
+	// village after the dialog has already closed.
+	gocv.Rectangle(&frame, image.Rect(40, 200, 110, 240), confirmFaceGreen, -1)
+	if _, ok := confirmTapPoint(frame, testConfirmRect); ok {
+		t.Fatal("a green blob with no confirm caption was accepted as Upgrade")
+	}
+
+	gocv.Rectangle(&frame, testConfirmRect.ImageRect(), color.RGBA{255, 255, 255, 255}, -1)
+	pt, ok := confirmTapPoint(frame, testConfirmRect)
+	if !ok {
+		t.Fatal("green Upgrade face above a captioned confirm box was not located")
+	}
+	if pt.X < 40 || pt.X > 110 || pt.Y < 200 || pt.Y > 240 {
+		t.Fatalf("tap (%d,%d) is off the green face", pt.X, pt.Y)
+	}
+}
+
+// TestWallChipsByPriceIconFollowsTheShiftedTray is the live 860x732 tray with
+// Upgrade More in it: the mapped gold rect (391,538)-(488,635) sits on Upgrade
+// More, and the real gold and elixir chips are one slot to the right.
+func TestWallChipsByPriceIconFollowsTheShiftedTray(t *testing.T) {
+	frame := gocv.NewMatWithSize(732, 860, gocv.MatTypeCV8UC3)
+	defer frame.Close()
+	frame.SetTo(gocv.NewScalar(60, 90, 70, 0))
+	white := color.RGBA{250, 250, 250, 255}
+	gocv.Rectangle(&frame, image.Rect(500, 570, 552, 582), white, -1)
+	gocv.Circle(&frame, image.Pt(562, 576), 8, color.RGBA{255, 205, 30, 255}, -1)
+	gocv.Rectangle(&frame, image.Rect(590, 568, 638, 580), white, -1)
+	gocv.Circle(&frame, image.Pt(647, 574), 8, color.RGBA{230, 60, 230, 255}, -1)
+
+	mappedGold := Rect{X1: 391, Y1: 538, X2: 488, Y2: 635}
+	gold, elixir, gOK, eOK := wallChipsByPriceIcon(frame, mappedGold)
+	if !gOK || !eOK {
+		t.Fatalf("price icons not found: gold=%v elixir=%v", gOK, eOK)
+	}
+	near := func(r Rect, x, y int) bool {
+		cx, cy := r.Center()
+		return cx > x-12 && cx < x+12 && cy > y-12 && cy < y+12
+	}
+	if !near(gold, 522, 600) {
+		t.Fatalf("gold chip %v, want centre near (522,600)", gold)
+	}
+	if !near(elixir, 615, 604) {
+		t.Fatalf("elixir chip %v, want centre near (615,604)", elixir)
+	}
+
+	// A coin with no price beside it (a village gold-mine bubble) is not a chip.
+	bare := gocv.NewMatWithSize(732, 860, gocv.MatTypeCV8UC3)
+	defer bare.Close()
+	bare.SetTo(gocv.NewScalar(60, 90, 70, 0))
+	gocv.Circle(&bare, image.Pt(300, 576), 8, color.RGBA{255, 205, 30, 255}, -1)
+	if _, _, gOK, eOK := wallChipsByPriceIcon(bare, mappedGold); gOK || eOK {
+		t.Fatal("a coin with no price tag was taken for an Upgrade chip")
+	}
+
+	if live := os.Getenv("WALL_TRAY_PNG"); live != "" {
+		img := gocv.IMRead(live, gocv.IMReadColor)
+		defer img.Close()
+		g, e, gOK, eOK := wallChipsByPriceIcon(img, mappedGold)
+		gx, gy := g.Center()
+		ex, ey := e.Center()
+		t.Logf("live %s: gold %v (%d,%d) elixir %v (%d,%d)", live, gOK, gx, gy, eOK, ex, ey)
+	}
+}
+
+func TestLocateConfirmTemplateFindsTheMovedButton(t *testing.T) {
+	ts, err := game.NewTemplateStore("../../assets/templates")
+	if err != nil {
+		t.Fatalf("NewTemplateStore: %v", err)
+	}
+	if err := ts.LoadTemplates(); err != nil {
+		t.Fatalf("LoadTemplates: %v", err)
+	}
+	t.Cleanup(ts.Close)
+	h := &WallUpgradeHooks{Templates: ts}
+	tpl, ok := confirmTemplate(h)
+	if !ok {
+		t.Skip("btn_confirm_upgrade template is not in this checkout")
+	}
+	if _, _, ok := locateConfirmTemplate(gocv.NewMat(), &WallUpgradeHooks{}); ok {
+		t.Fatal("no template store still reported a Confirm match")
+	}
+
+	blank := gocv.NewMatWithSize(732, 860, gocv.MatTypeCV8UC3)
+	defer blank.Close()
+	blank.SetTo(gocv.NewScalar(40, 40, 40, 0))
+	if _, _, ok := locateConfirmTemplate(blank, h); ok {
+		t.Fatal("an empty village matched the Confirm button")
+	}
+
+	// Pasted where the live dialog now sits: above the mapped confirm rect,
+	// which on 860x732 no longer holds the green face.
+	frame := blank.Clone()
+	defer frame.Close()
+	at := image.Pt(180, 340)
+	dst := frame.Region(image.Rect(at.X, at.Y, at.X+tpl.Cols(), at.Y+tpl.Rows()))
+	tpl.CopyTo(&dst)
+	dst.Close()
+
+	pt, conf, ok := locateConfirmTemplate(frame, h)
+	if !ok {
+		t.Fatal("Confirm template pasted above the mapped rect was not found")
+	}
+	want := image.Pt(at.X+tpl.Cols()/2, at.Y+tpl.Rows()/2)
+	if dx, dy := pt.X-want.X, pt.Y-want.Y; dx > 4 || dx < -4 || dy > 4 || dy < -4 {
+		t.Fatalf("tap (%d,%d) conf %.2f is off the pasted Confirm centre %v", pt.X, pt.Y, conf, want)
+	}
+}
+
 // TestWallLoopChromeAltRectIsNotAPopup is the regression test for the other half
 // of the live failure: x_popup_roi_alt maps onto this client's resource HUD, so
 // brightness alone read alt_up with alt_px=151 on every verify and turned BOTH
@@ -1719,5 +1832,56 @@ func TestLiveCropsPinTheConfirmSignature(t *testing.T) {
 				t.Errorf("confirmButtonDrawn(%s) = %v (bright=%d green=%d), want %v", tc.crop, drawn, bright, green, tc.isBtn)
 			}
 		})
+	}
+}
+
+func TestWallDumpStartsFullAndStopsAtTwenty(t *testing.T) {
+	full := game.VillageResources{GoldFillPercent: 96, ElixirFillPercent: 40}
+	if !wallDumpFull(full, "both", 95) {
+		t.Fatal("gold at 96 must start a both-resource dump")
+	}
+	if wallDumpSpent(full, "both") {
+		t.Fatal("elixir at 40 is still above 20")
+	}
+	low := game.VillageResources{GoldFillPercent: 20, ElixirFillPercent: 18}
+	if !wallDumpSpent(low, "both") {
+		t.Fatal("both bars at or below 20 must end the dump")
+	}
+	if wallDumpFull(low, "both", 95) {
+		t.Fatal("bars at 20 must not start another dump")
+	}
+	goldOnly := game.VillageResources{GoldFillPercent: 19, ElixirFillPercent: 100}
+	if !wallDumpSpent(goldOnly, "gold") {
+		t.Fatal("a gold-only dump ignores a full elixir bar")
+	}
+	if wallDumpSpent(game.VillageResources{}, "both") {
+		t.Fatal("a covered HUD reads as empty bars and must not end the dump")
+	}
+	if wallDumpFull(goldOnly, "elixir", 95) == false {
+		t.Fatal("elixir-only dump must notice a full elixir bar")
+	}
+}
+
+func TestWallLoopStopsWhenStoragesDrop(t *testing.T) {
+	dev := &wallFakeDevice{wallVisible: true, affordable: true}
+	hr := newWallHarness(t, dev, "all", "text_wall")
+	checks := 0
+	hr.h.StoragesSpent = func() bool {
+		checks++
+		return checks > 1
+	}
+	hr.run()
+
+	if !hr.stepsContain("upgrade_success") {
+		t.Fatalf("the dump did not upgrade the first wall: %v", hr.steps)
+	}
+	if strings.Count(strings.Join(hr.steps, ","), "upgrade_success") != 1 {
+		t.Fatalf("dump kept upgrading after storages were spent: %v", hr.steps)
+	}
+	if !hr.stepsContain("storages_spent") {
+		t.Fatalf("no storages_spent stop: %v", hr.steps)
+	}
+	if hr.steps[len(hr.steps)-1] != "sequence_end" {
+		t.Fatalf("sequence did not close: %v", hr.steps)
 	}
 }

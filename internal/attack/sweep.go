@@ -317,6 +317,12 @@ func (sw *Sweeper) Sweep(strategyUnitNames []string, troopCounts map[int]int) in
 
 		if empty {
 			slot.IsEmpty = true
+			// An unnamed troop the main line already emptied must not be
+			// started over by the event pass. A named card, and a hero,
+			// keeps its state so a later retry can still place it.
+			if slot.UnitName == "" && slot.Category == "Troop" {
+				sw.slotManager.MarkSlotDeployed(slot)
+			}
 			continue
 		}
 
@@ -341,10 +347,13 @@ func (sw *Sweeper) Sweep(strategyUnitNames []string, troopCounts map[int]int) in
 		// Deploy this slot with correct count
 		success := sw.deploySlot(slot, count, false)
 		if success {
-			sw.slotManager.MarkDeployed(slot.UnitName)
+			sw.slotManager.MarkSlotDeployed(slot)
 			deployedCount++
 		} else {
-			sw.slotManager.MarkFailed(slot.UnitName)
+			// Pointer, not the name. An unnamed stack has no name, so
+			// MarkFailed("") does nothing and the event pass below starts
+			// the same card over for another six rounds.
+			sw.slotManager.MarkSlotFailed(slot)
 		}
 		time.Sleep(60 * time.Millisecond)
 	}
@@ -788,7 +797,7 @@ func (sw *Sweeper) deploySlot(slot *TrackedSlot, count int, isEventTroop bool) b
 		if countResolved {
 			firedResolvedOnce = true
 		}
-		bailedEarly := sw.fireTapsBatched(slot, fp1, fp2, count, isEventTroop || count >= 12, isEventTroop)
+		bailedEarly := sw.fireTapsBatched(slot, fp1, fp2, count, isEventTroop || count >= 12)
 		if bailedEarly {
 			slot.IsEmpty = true
 			sw.logger.Info().
@@ -962,12 +971,9 @@ func spellLikeSlot(slot *TrackedSlot) bool {
 // never false-positive on a transient empty frame mid-burst.
 // fast skips the per-batch screencap for event troops and large slots
 // (they can hold 50+ units and the caller's reconcile loop re-checks).
-// humanPace applies the slower human-like cadence; it is enabled for
-// event troops so bonus dumps read as rapid human spamming instead of
-// a machine.
 // Returns true when the function bailed early because the slot became
 // genuinely empty mid-pass.
-func (sw *Sweeper) fireTapsBatched(slot *TrackedSlot, p1, p2 image.Point, count int, fast, humanPace bool) bool {
+func (sw *Sweeper) fireTapsBatched(slot *TrackedSlot, p1, p2 image.Point, count int, fast bool) bool {
 	sw.lineForward = !sw.lineForward
 	if !sw.lineForward {
 		p1, p2 = p2, p1
@@ -1019,16 +1025,10 @@ func (sw *Sweeper) fireTapsBatched(slot *TrackedSlot, p1, p2 image.Point, count 
 			}
 		}
 
-		// Fast path still needs a human cadence — 50ms between batches is
-		// robotic and detectable. Slow it to ~160-210ms with variance so
-		// bonus-troop dumps read as rapid human spamming, not a machine.
-		// The non-fast path keeps its tighter 50ms floor (the reconcile
-		// screencap already paces it naturally).
-		if humanPace {
-			sw.executor.HumanSleep(160, 50)
-		} else {
-			sw.executor.HumanSleep(50, 15)
-		}
+		// 50ms is the floor that still lets CoC register each batch as its
+		// own drops. Slower than this and a full card takes the rest of
+		// the deploy window; faster and CoC merges the batch into one drop.
+		sw.executor.HumanSleep(50, 15)
 
 		// Smart mid-batch bail. Only exit early when BOTH conditions
 		// agree the slot is currently empty: a transient empty frame

@@ -798,6 +798,7 @@ func (e *Executor) DeployDynamicV2(s *strategy.DynamicStrategy, screen gocv.Mat,
 	heroMgr.SetRedZone(redZone)
 	heroMgr.SetPinnedGround(userPinnedForTarget)
 
+	dumpedUnnamedStacks := false
 	for _, plan := range plans {
 		if err := e.deploymentErr(); err != nil {
 			return len(slotMgr.GetUndeployedSlots()), err
@@ -922,6 +923,33 @@ func (e *Executor) DeployDynamicV2(s *strategy.DynamicStrategy, screen gocv.Mat,
 				Int("x", up.Slot.X).
 				Int64("elapsed_ms", time.Since(unitStart).Milliseconds()).
 				Msg("unit deploy elapsed")
+		}
+
+		// Unnamed stacks (a troop card the templates could not name) are not in
+		// the strategy, so they used to sit until the sweep and then get a
+		// second dump from the event pass. One burst on this phase's line,
+		// once per battle, puts them down with the named troops.
+		if !dumpedUnnamedStacks && len(ResolveTroopTargets(plan)) > 0 {
+			dumpedUnnamedStacks = true
+			for _, slot := range slotMgr.UnnamedTroopStacks(countMap) {
+				count, trusted := GetCountForSlotMeasured(troopCounts, slot.X)
+				e.logger.Info().
+					Int("x", slot.X).
+					Int("count", count).
+					Msg("deploying unnamed troop stack with the main line")
+				tapExec.TapSlot(slot, 8)
+				tapExec.HumanSleep(150, 30)
+				unitStart := time.Now()
+				heroMgr.DeployTroops(
+					strategy.Unit{Name: "troop stack", Amount: fmt.Sprintf("%d", count)},
+					slot, plan.Phase.Pattern, plan.Phase.Offset, plan.Phase.Pattern,
+					screen, count, trusted,
+				)
+				e.logger.Info().
+					Int("x", slot.X).
+					Int64("elapsed_ms", time.Since(unitStart).Milliseconds()).
+					Msg("unnamed troop stack deploy elapsed")
+			}
 		}
 
 		// Deploy siege

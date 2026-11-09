@@ -1636,6 +1636,39 @@ func (b *Bot) executeAttackSequence(gc *game.GameContext) {
 		}
 	}
 
+	// Walls run once, before the next search, and only when a watched storage
+	// is full. The loop itself stops at 20% so the attack below still happens.
+	// They used to run after every battle, which spent a builder on a single
+	// wall between attacks instead of dumping a full storage in one pass.
+	if b.cfg.Upgrade.UpgradeWalls {
+		screen, err := b.client.CaptureToMat()
+		if err != nil || screen.Empty() {
+			b.logger.Warn().Err(err).Msg("village storage fill unreadable; skipping wall dump")
+		} else {
+			scale := 1.0
+			if b.cal != nil {
+				scale = b.cal.DisplayScale()
+			}
+			fill := game.ReadVillageStorageFillMat(screen, scale)
+			screen.Close()
+			b.logger.Info().
+				Float64("gold", fill.GoldFillPercent).
+				Float64("elixir", fill.ElixirFillPercent).
+				Float64("de", fill.DEFillPercent).
+				Float64("full_at", b.cfg.Storage.FullThresholdPercent).
+				Msg("village storage fill")
+			if wallDumpFull(fill, b.cfg.Upgrade.WallResource, b.cfg.Storage.FullThresholdPercent) {
+				b.logger.Info().
+					Float64("gold", fill.GoldFillPercent).
+					Float64("elixir", fill.ElixirFillPercent).
+					Float64("full_at", b.cfg.Storage.FullThresholdPercent).
+					Float64("stop_at", wallDumpStopPercent).
+					Msg("storages full; upgrading walls until they drop to 20%, then attacking")
+				b.UpgradeWalls(gc)
+			}
+		}
+	}
+
 	// Storage full detection gate
 	if b.cfg.Storage.HaltWhenGoldFull || b.cfg.Storage.HaltWhenElixirFull || b.cfg.Storage.HaltWhenDEFull {
 		screen, err := b.client.CaptureToMat()
@@ -2249,10 +2282,6 @@ func (b *Bot) executeAttackSequence(gc *game.GameContext) {
 		} else {
 			b.logger.Debug().Msg("returned home with nothing to dismiss; no tap fired")
 		}
-	}
-
-	if b.cfg.Upgrade.UpgradeWalls {
-		b.UpgradeWalls(gc)
 	}
 
 	// Auto upgrades (Builders, Lab, Pets) via modern Build Menu 2.0

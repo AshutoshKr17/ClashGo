@@ -1137,118 +1137,93 @@ func (lr *LootRecognizer) ReadVillageStorageFill(screen gocv.Mat) VillageResourc
 	return ReadVillageStorageFillMat(screen, lr.scale)
 }
 
-// ReadVillageStorageFillMat measures the storage fullness directly on a Mat given a display scale.
+// ReadVillageStorageFillMat measures the village storage bars on a frame.
+//
+// scale is ignored. It is the template display-scale pin (1.1334 on this
+// device). The bars live in framebuffer pixels. Multiplying the old sample
+// row by that pin landed at y=44 and y=86 on an 860×732 village, and the
+// capsules are at y=18–40 (gold) and y=52–68 (elixir). A full storage then
+// read as 0, so the wall dump never started. Positions below were measured
+// on that frame: the track is x = w-179 .. w-48, and the fullest row of the
+// capsule is the fill (the digit row in the middle is mostly white text).
 func ReadVillageStorageFillMat(screen gocv.Mat, scale float64) VillageResources {
 	if screen.Empty() {
 		return VillageResources{}
 	}
-	if scale <= 0 {
-		scale = 1.0
-	}
+	_ = scale
 
 	w := screen.Cols()
 	h := screen.Rows()
-
-	// In reference geometry (860x732), the bar right edge sits ~25px from screen right edge,
-	// and bar width is ~200px. Scaled to live resolution:
-	barRight := w - int(25*scale)
-	barWidth := int(200 * scale)
-	if barWidth <= 0 || barRight <= barWidth {
+	sx := float64(w) / 860.0
+	sy := float64(h) / 732.0
+	if sx <= 0 || sy <= 0 {
 		return VillageResources{}
 	}
-	barLeft := barRight - barWidth
-	if barLeft < 0 {
-		barLeft = 0
+	left := w - int(179*sx)
+	right := w - int(48*sx)
+	if left < 0 {
+		left = 0
+	}
+	if right > w {
+		right = w
+	}
+	width := right - left
+	if width <= 0 {
+		return VillageResources{}
 	}
 
-	// Reference vertical positions of the resource bar centers:
-	// Gold: ~39, Elixir: ~76, Dark Elixir: ~113
-	goldY := int(39 * scale)
-	elixirY := int(76 * scale)
-	deY := int(113 * scale)
-
-	sampleBand := int(3 * scale)
-	if sampleBand < 1 {
-		sampleBand = 1
-	}
-
-	// 1. Measure Gold
-	goldFilled := 0
-	if goldY-sampleBand >= 0 && goldY+sampleBand < h {
-		for x := barLeft; x < barRight; x++ {
-			hasColor := false
-			for y := goldY - sampleBand; y <= goldY+sampleBand; y++ {
-				b := screen.GetUCharAt(y, x*3)
-				g := screen.GetUCharAt(y, x*3+1)
-				r := screen.GetUCharAt(y, x*3+2)
-				// Gold yellow: low Blue (< 130), high Green (> 130), high Red (> 160)
-				if b < 130 && g > 130 && r > 160 {
-					hasColor = true
-					break
-				}
-			}
-			if hasColor {
-				goldFilled++
-			}
-		}
-	}
-
-	// 2. Measure Elixir
-	elixirFilled := 0
-	if elixirY-sampleBand >= 0 && elixirY+sampleBand < h {
-		for x := barLeft; x < barRight; x++ {
-			hasColor := false
-			for y := elixirY - sampleBand; y <= elixirY+sampleBand; y++ {
-				b := screen.GetUCharAt(y, x*3)
-				g := screen.GetUCharAt(y, x*3+1)
-				r := screen.GetUCharAt(y, x*3+2)
-				// Elixir magenta/pink: high Blue (> 130), low Green (< 130), high Red (> 130)
-				if b > 130 && g < 130 && r > 130 {
-					hasColor = true
-					break
-				}
-			}
-			if hasColor {
-				elixirFilled++
-			}
-		}
-	}
-
-	// 3. Measure Dark Elixir
-	deFilled := 0
-	if deY-sampleBand >= 0 && deY+sampleBand < h {
-		for x := barLeft; x < barRight; x++ {
-			hasColor := false
-			for y := deY - sampleBand; y <= deY+sampleBand; y++ {
-				b := int(screen.GetUCharAt(y, x*3))
-				g := int(screen.GetUCharAt(y, x*3+1))
-				r := int(screen.GetUCharAt(y, x*3+2))
-				// DE dark purple: high blue/red relative to green, moderate saturation
-				if b > 70 && r > 70 && g < b && g < r {
-					hasColor = true
-					break
-				}
-			}
-			if hasColor {
-				deFilled++
-			}
-		}
-	}
-
-	calcPct := func(filled, total int) float64 {
-		if total <= 0 {
-			return 0
-		}
-		pct := (float64(filled) / float64(total)) * 100.0
-		if pct > 100.0 {
-			pct = 100.0
-		}
-		return math.Round(pct*10) / 10
-	}
-
+	gold := storageBarPercent(screen, int(16*sy), int(42*sy), left, right, storageGoldPixel)
+	elixir := storageBarPercent(screen, int(50*sy), int(68*sy), left, right, storageElixirPixel)
+	de := storageBarPercent(screen, int(70*sy), int(80*sy), left, right, storageDEPixel)
 	return VillageResources{
-		GoldFillPercent:   calcPct(goldFilled, barWidth),
-		ElixirFillPercent: calcPct(elixirFilled, barWidth),
-		DEFillPercent:     calcPct(deFilled, barWidth),
+		GoldFillPercent:   gold,
+		ElixirFillPercent: elixir,
+		DEFillPercent:     de,
 	}
+}
+
+func storageBarPercent(screen gocv.Mat, y0, y1, x0, x1 int, match func(b, g, r int) bool) float64 {
+	width := x1 - x0
+	if width <= 0 {
+		return 0
+	}
+	rows, cols := screen.Rows(), screen.Cols()
+	best := 0
+	for y := y0; y <= y1; y++ {
+		if y < 0 || y >= rows {
+			continue
+		}
+		n := 0
+		for x := x0; x < x1; x++ {
+			if x < 0 || x >= cols {
+				continue
+			}
+			b := int(screen.GetUCharAt(y, x*3))
+			g := int(screen.GetUCharAt(y, x*3+1))
+			r := int(screen.GetUCharAt(y, x*3+2))
+			if match(b, g, r) {
+				n++
+			}
+		}
+		if n > best {
+			best = n
+		}
+	}
+	pct := (float64(best) / float64(width)) * 100.0
+	if pct > 100 {
+		pct = 100
+	}
+	return math.Round(pct*10) / 10
+}
+
+func storageGoldPixel(b, g, r int) bool {
+	return r > 70 && g > 50 && b < 90 && r > b+25 && g > b+10
+}
+
+func storageElixirPixel(b, g, r int) bool {
+	return r > 60 && b > 50 && g+15 < r && g+5 < b
+}
+
+func storageDEPixel(b, g, r int) bool {
+	return b > 40 && r > 30 && g < b-10 && b > r-30 && r+b > g*2
 }

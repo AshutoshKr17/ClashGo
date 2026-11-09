@@ -231,6 +231,13 @@ type WallUpgradeHooks struct {
 	// interrupts an otherwise-unbounded wall-upgrade run.
 	StopCheck func() bool
 
+	// StoragesSpent is consulted at the top of every wall, after StopCheck.
+	// When it reports the watched storages have fallen to wallDumpStopPercent
+	// the loop stops so attacks can resume. Nil keeps the old behaviour:
+	// run until the next wall is unaffordable. A capture failure must return
+	// false so one bad frame does not abandon a dump that is still above the floor.
+	StoragesSpent func() bool
+
 	// WallResource specifies resource preference ("gold", "elixir", "both").
 	WallResource string
 
@@ -255,11 +262,60 @@ func (h *WallUpgradeHooks) sleep(d time.Duration) {
 	time.Sleep(d)
 }
 
-// UpgradeWalls executes the wall-upgrade sequence repeatedly until no
-// more affordable options exist. After this refactor it is a thin
-// wrapper that delegates to runWallUpgradeLoop with the production
-// Bot's dependencies. The diagnostic tool at cmd/test_wall_upgrade
-// calls runWallUpgradeLoop directly with a hand-built hooks struct.
+// wallDumpStopPercent is the storage-bar floor the wall dump spends down to.
+// Attacks resume once every watched resource is at or below this percent.
+const wallDumpStopPercent = 20.0
+
+// wallWatch reports which storage bars a wall dump spends. Walls take gold
+// or elixir; dark elixir is never one of them. An empty preference watches both.
+func wallWatch(resource string) (gold, elixir bool) {
+	switch strings.ToLower(strings.TrimSpace(resource)) {
+	case "gold":
+		return true, false
+	case "elixir":
+		return false, true
+	default:
+		return true, true
+	}
+}
+
+// wallDumpFull reports whether a wall dump should start: at least one watched
+// storage bar is at or above the full threshold (95 when unset).
+func wallDumpFull(fill game.VillageResources, resource string, fullPct float64) bool {
+	if fullPct <= 0 {
+		fullPct = 95
+	}
+	gold, elixir := wallWatch(resource)
+	return (gold && fill.GoldFillPercent >= fullPct) || (elixir && fill.ElixirFillPercent >= fullPct)
+}
+
+// wallDumpSpent reports whether the dump is finished: every watched bar is at
+// or below wallDumpStopPercent. A bar that is not watched does not keep the
+// dump running. All-zero is a covered HUD (a dialog over the resource bars),
+// not an empty storage, so it does not end the dump.
+func wallDumpSpent(fill game.VillageResources, resource string) bool {
+	gold, elixir := wallWatch(resource)
+	if gold && elixir && fill.GoldFillPercent == 0 && fill.ElixirFillPercent == 0 {
+		return false
+	}
+	if gold && !elixir && fill.GoldFillPercent == 0 {
+		return false
+	}
+	if elixir && !gold && fill.ElixirFillPercent == 0 {
+		return false
+	}
+	if gold && fill.GoldFillPercent > wallDumpStopPercent {
+		return false
+	}
+	if elixir && fill.ElixirFillPercent > wallDumpStopPercent {
+		return false
+	}
+	return gold || elixir
+}
+
+// UpgradeWalls spends walls until the watched storages fall to
+// wallDumpStopPercent, or until the next wall is unaffordable. The caller
+// starts it only when a watched storage is full.
 func (b *Bot) UpgradeWalls(gc *game.GameContext) {
 	resource := b.cfg.Upgrade.WallResource
 	if resource == "" {
@@ -278,9 +334,50 @@ func (b *Bot) UpgradeWalls(gc *game.GameContext) {
 		Dismiss:    b.dismissSelection,
 		// StopCheck lets a user Stop interrupt the otherwise-unbounded
 		// wall-upgrade loop at its next iteration boundary.
-		StopCheck:    func() bool { return b.ctx.Err() != nil },
+		StopCheck: func() bool { return b.ctx.Err() != nil },
+		StoragesSpent: func() bool {
+			screen, err := b.client.CaptureToMat()
+			if err != nil || screen.Empty() {
+				return false
+			}
+			scale := 1.0
+			if b.cal != nil {
+				scale = b.cal.DisplayScale()
+			}
+			fill := game.ReadVillageStorageFillMat(screen, scale)
+			screen.Close()
+			spent := wallDumpSpent(fill, resource)
+			if spent {
+				b.logger.Info().
+					Float64("gold", fill.GoldFillPercent).
+					Float64("elixir", fill.ElixirFillPercent).
+					Float64("stop_at", wallDumpStopPercent).
+					Msg("wall storages at or below 20%; stopping the wall dump")
+			}
+			return spent
+		},
 		WallResource: resource,
+		// Keeps the frames the confirm decision was made on, so a skipped or
+		// misplaced confirm tap can be checked against what was on screen.
+		OnStep: func(step string, data map[string]any) {
+			frame, ok := data["screen"].(gocv.Mat)
+			if !ok {
+				return
+			}
+			defer frame.Close()
+			if step == "asset_driven_confirm_page" || step == "asset_driven_tray_gate" {
+				name, _ := data["name"].(string)
+				_ = gocv.IMWrite(paths.ResolveConfig("wall_"+step+"_"+name+".png"), frame)
+			}
+		},
 	})
+	// Selecting a wall pans and zooms the camera onto it. The attack flow and
+	// the storage reader expect the max zoom-out village.
+	if b.navigator != nil {
+		if err := b.navigator.ZoomOutMax(); err != nil {
+			b.logger.Warn().Err(err).Msg("zoom-out after the wall dump failed")
+		}
+	}
 }
 
 // RunWallUpgradeLoop drives the wall-upgrade sequence with explicit deps
@@ -390,6 +487,11 @@ func RunWallUpgradeLoop(h *WallUpgradeHooks) {
 		if h.StopCheck != nil && h.StopCheck() {
 			h.Logger.Info().Msg("Wall upgrade loop stopped by stop signal")
 			h.step("stopped", nil)
+			break
+		}
+		if h.StoragesSpent != nil && h.StoragesSpent() {
+			h.Logger.Info().Msg("Wall upgrade loop stopped: watched storages are down to 20%")
+			h.step("storages_spent", nil)
 			break
 		}
 		h.Logger.Info().Int("count", upgradeCount).Msg("Starting wall upgrade loop iteration")
@@ -772,6 +874,9 @@ func RunWallUpgradeLoop(h *WallUpgradeHooks) {
 				}
 			}
 			for _, btn := range buttons {
+				if btn.rect.Empty() {
+					continue
+				}
 				bcx, bcy := btn.rect.Center()
 				h.step("asset_driven_tap_upgrade", map[string]any{
 					"name": btn.name, "x": bcx, "y": bcy,
@@ -807,10 +912,12 @@ func RunWallUpgradeLoop(h *WallUpgradeHooks) {
 				// client (bright ~1840, the measured confirm-page signature) while
 				// the green Upgrade face has slid out of it (green ~220). Tapping
 				// the box centre then hits the village and the selection resets.
-				// The face is located in the frame instead; the box is only used
-				// when the face is actually drawn inside it.
+				// The face is located in the frame instead, and only while that
+				// caption is up. Live 2026-11-10 the elixir attempt ran with the
+				// dialog already gone (bright 0) and the search tapped a green
+				// blob at (534,443); that tap was then counted as a finished wall.
 				if !confirmDrawn {
-					if pt, ok := findConfirmButton(pageScreen, confirmRect); ok {
+					if pt, ok := confirmTapPoint(pageScreen, confirmRect); ok {
 						tapX, tapY = pt.X, pt.Y
 						confirmDrawn = true
 						h.Logger.Info().
@@ -819,6 +926,16 @@ func RunWallUpgradeLoop(h *WallUpgradeHooks) {
 							Int("confirm_green", confirmGreen).
 							Str("button", btn.name).
 							Msg("mapped confirm rect missed the green Upgrade button; tapping the one located in the frame")
+					} else if pt, conf, ok := locateConfirmTemplate(pageScreen, h); ok {
+						tapX, tapY = pt.X, pt.Y
+						confirmDrawn = true
+						h.Logger.Info().
+							Int("x", tapX).Int("y", tapY).
+							Float64("conf", conf).
+							Int("confirm_bright", confirmBright).
+							Int("confirm_green", confirmGreen).
+							Str("button", btn.name).
+							Msg("mapped confirm rect missed the Upgrade button; tapping the Confirm template match")
 					}
 				}
 				h.stepScreen("asset_driven_confirm_page", pageScreen, map[string]any{
@@ -843,6 +960,16 @@ func RunWallUpgradeLoop(h *WallUpgradeHooks) {
 						"confirm_green":  confirmGreen,
 						"confirm_rect":   confirmRect.ImageRect(),
 					})
+					// The gold chip opened the dialog and the Upgrade face was
+					// not one we will press. Leaving it up makes the elixir
+					// chip tap land on the dialog instead of the tray.
+					// The tray itself leaves ~600 bright pixels in this rect
+					// (live 02:44, both buttons 588 and 590). Backing out at
+					// that level closed the wall selection. A dialog that is
+					// actually covering the rect reads 1200 or more.
+					if confirmBright >= confirmDialogBrightMin {
+						leaveConfirmDialog(h, confirmRect)
+					}
 					continue
 				}
 
@@ -1770,9 +1897,13 @@ func leaveConfirmDialog(h *WallUpgradeHooks, confirmRect Rect) {
 		h.Logger.Warn().Err(err).Msg("could not capture before leaving the confirm dialog; sending no Back")
 		return
 	}
-	drawn, bright, green := confirmButtonDrawn(screen, confirmRect)
+	_, bright, green := confirmButtonDrawn(screen, confirmRect)
 	screen.Close()
-	if !drawn {
+	// The white caption is enough. The green face can sit outside the mapped
+	// box (green stays under confirmGreenMin) while the dialog still covers
+	// the tray; waiting for the face to be inside the box left that dialog up
+	// and the next chip tap hit it.
+	if bright < confirmBrightMin {
 		return
 	}
 	h.step("asset_driven_leave_confirm_dialog", map[string]any{
@@ -1971,6 +2102,12 @@ const (
 	//	step6 popup          bright    0  green    0   (the popup covers the dialog)
 	confirmBrightMin = 400
 	confirmGreenMin  = 400
+
+	// confirmDialogBrightMin is the live 860x732 floor for "the confirm
+	// dialog's white body is covering the mapped rect". Open dialogs read
+	// 1200-2700. The wall tray sitting in the same rect reads 300-700, and
+	// backing out at that level closes the selection before elixir is tried.
+	confirmDialogBrightMin = 1000
 )
 
 // redFacePixelsIn counts the strongly red pixels inside rect. CoC paints the
@@ -2040,6 +2177,134 @@ func confirmButtonDrawn(screen gocv.Mat, confirm Rect) (drawn bool, bright, gree
 	bright = modalBrightPixelsIn(screen, confirm)
 	green = greenFacePixelsIn(screen, confirm)
 	return bright >= confirmBrightMin && green >= confirmGreenMin, bright, green
+}
+
+// confirmTapPoint is the Upgrade tap for one confirm page.
+//
+// The mapped centre is used when the green face is drawn inside the box.
+// Otherwise the face is searched for only while the dialog's white caption
+// is in that box. A green blob on the village, with no caption, is not the
+// Upgrade button: live 2026-11-10 that search tapped (534,443) and the loop
+// recorded the wall as upgraded.
+func confirmTapPoint(screen gocv.Mat, confirm Rect) (image.Point, bool) {
+	drawn, bright, _ := confirmButtonDrawn(screen, confirm)
+	if drawn {
+		x, y := confirm.Center()
+		return image.Pt(x, y), true
+	}
+	if bright < confirmBrightMin {
+		return image.Point{}, false
+	}
+	return findConfirmButton(screen, confirm)
+}
+
+// wallChipsByPriceIcon finds the gold and elixir Upgrade chips from the price
+// tag on top of each: a white (affordable) or red (short) price followed by a
+// gold coin or a pink elixir drop. ref is any mapped chip rect; it supplies
+// the tray's row and the chip size. Measured live 860x732 (wall level 10):
+// coin at (562,576) on the chip centred (522,600), drop at (647,574) on the
+// chip centred (615,604). A chip whose icon is not found comes back empty so
+// the caller does not tap it.
+func wallChipsByPriceIcon(screen gocv.Mat, ref Rect) (gold, elixir Rect, goldOK, elixirOK bool) {
+	r := ref.ImageRect()
+	if r.Empty() || screen.Cols() == 0 || screen.Rows() == 0 || screen.Channels() < 3 {
+		return
+	}
+	k := float64(r.Dy()) / 97.0
+	band := image.Rect(0, r.Min.Y, screen.Cols(), r.Min.Y+r.Dy()/2).
+		Intersect(image.Rect(0, 0, screen.Cols(), screen.Rows()))
+	if band.Empty() {
+		return
+	}
+	isGold := func(b, g, rr int) bool { return rr > 200 && g > 150 && b < 90 && rr > b+120 }
+	isElixir := func(b, g, rr int) bool { return rr > 170 && b > 170 && g < 120 }
+	isPrice := func(b, g, rr int) bool {
+		return (rr > 225 && g > 225 && b > 225) || (rr > 200 && g < 100 && b < 100)
+	}
+	count := func(rect image.Rectangle, pred func(b, g, r int) bool) int {
+		return colourFacePixelsIn(screen, Rect{X1: rect.Min.X, Y1: rect.Min.Y, X2: rect.Max.X, Y2: rect.Max.Y}, pred)
+	}
+	find := func(pred func(b, g, r int) bool) (image.Point, bool) {
+		sub := screen.Region(band)
+		defer sub.Close()
+		cols := make([]int, sub.Cols())
+		sumY := make([]int, sub.Cols())
+		for y := 0; y < sub.Rows(); y++ {
+			for x := 0; x < sub.Cols(); x++ {
+				p := sub.GetVecbAt(y, x)
+				if pred(int(p[0]), int(p[1]), int(p[2])) {
+					cols[x]++
+					sumY[x] += y
+				}
+			}
+		}
+		minW := max(6, int(8*k))
+		best, bestTotal := image.Point{}, 0
+		for x := 0; x < len(cols); {
+			if cols[x] < 2 {
+				x++
+				continue
+			}
+			x0, total, ys := x, 0, 0
+			for x < len(cols) && cols[x] >= 2 {
+				total += cols[x]
+				ys += sumY[x]
+				x++
+			}
+			if x-x0 < minW || total < int(30*k*k) {
+				continue
+			}
+			c := image.Pt(band.Min.X+(x0+x)/2, band.Min.Y+ys/total)
+			text := image.Rect(band.Min.X+x0-int(70*k), c.Y-int(8*k), band.Min.X+x0-int(3*k), c.Y+int(8*k))
+			if count(text, isPrice) < int(25*k*k) {
+				continue
+			}
+			if total > bestTotal {
+				best, bestTotal = c, total
+			}
+		}
+		return best, bestTotal > 0
+	}
+	chip := func(icon image.Point, dx int) Rect {
+		cx, cy := icon.X-int(float64(dx)*k), icon.Y+int(26*k)
+		hw, hh := r.Dx()/2, r.Dy()/2
+		return Rect{X1: cx - hw, Y1: cy - hh, X2: cx + hw, Y2: cy + hh}
+	}
+	if p, ok := find(isGold); ok {
+		gold, goldOK = chip(p, 40), true
+	}
+	if p, ok := find(isElixir); ok {
+		elixir, elixirOK = chip(p, 32), true
+	}
+	return
+}
+
+// confirmTemplate is the Confirm button picture, when the store has it.
+func confirmTemplate(h *WallUpgradeHooks) (gocv.Mat, bool) {
+	if h == nil || h.Templates == nil {
+		return gocv.Mat{}, false
+	}
+	return h.Templates.Get("btn_confirm_upgrade")
+}
+
+// locateConfirmTemplate finds the Confirm button by its picture. The mapped
+// rect on this client holds the dialog's white body (bright 1200-2700, green
+// about 0) while the green face has moved, and the colour search then either
+// misses it or, with the dialog gone, taps a village blob. The template is
+// the button itself, so a match is that button wherever the dialog reflowed.
+// The search starts below the resource HUD so a partial match up there cannot
+// win.
+func locateConfirmTemplate(screen gocv.Mat, h *WallUpgradeHooks) (image.Point, float64, bool) {
+	tpl, ok := confirmTemplate(h)
+	if !ok || screen.Cols() < 1 || screen.Rows() < 1 || tpl.Cols() < 1 || tpl.Rows() < 1 {
+		return image.Point{}, 0, false
+	}
+	roi := image.Rect(0, screen.Rows()*3/10, screen.Cols(), screen.Rows())
+	matches, _ := vision.MatchMultiScaleROICached(screen, tpl, "btn_confirm_upgrade", 0.6, 1.2, 9, 0.72, roi)
+	if len(matches) == 0 {
+		return image.Point{}, 0, false
+	}
+	return matches[0].Point, matches[0].Confidence, true
 }
 
 // findConfirmButton locates the green Upgrade button when the mapped confirm
@@ -2184,6 +2449,14 @@ func (g wallTrayGate) Data() map[string]any {
 func locateWallTray(screen gocv.Mat, gold, elixir Rect) wallTrayGate {
 	gChip, gFace, gFound := locateWallTrayChip(screen, gold)
 	eChip, eFace, eFound := locateWallTrayChip(screen, elixir)
+	// The tray's button count changes with the selection (Select Row and
+	// Upgrade More come and go), so the chips slide sideways. Live 860x732 the
+	// mapped gold rect sat on Upgrade More and the mapped elixir rect on the
+	// gold chip. The price tag's coin or drop says which chip is which.
+	if g, e, gOK, eOK := wallChipsByPriceIcon(screen, gold); gOK || eOK {
+		gChip, gFound = g, gOK
+		eChip, eFound = e, eOK
+	}
 	return wallTrayGate{
 		GoldChip:     gChip,
 		ElixirChip:   eChip,

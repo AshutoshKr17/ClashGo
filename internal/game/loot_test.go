@@ -448,6 +448,30 @@ func TestVillageResources_IsFull(t *testing.T) {
 	}
 }
 
+func TestReadVillageStorageFill_IgnoresDisplayScalePin(t *testing.T) {
+	m := gocv.NewMatWithSize(732, 860, gocv.MatTypeCV8UC3)
+	defer m.Close()
+	// Gold capsule edge, the row the digit text does not cover. BGR.
+	for x := 681; x < 812; x++ {
+		m.SetUCharAt(19, x*3+0, 5)
+		m.SetUCharAt(19, x*3+1, 180)
+		m.SetUCharAt(19, x*3+2, 220)
+	}
+	// Elixir half full on its edge row.
+	for x := 681; x < 681+65; x++ {
+		m.SetUCharAt(56, x*3+0, 180)
+		m.SetUCharAt(56, x*3+1, 40)
+		m.SetUCharAt(56, x*3+2, 180)
+	}
+	res := ReadVillageStorageFillMat(m, 1.1334)
+	if res.GoldFillPercent < 95 {
+		t.Fatalf("gold = %.1f, a full bar must read at least 95", res.GoldFillPercent)
+	}
+	if res.ElixirFillPercent < 40 || res.ElixirFillPercent > 60 {
+		t.Fatalf("elixir = %.1f, half bar should land near 50", res.ElixirFillPercent)
+	}
+}
+
 func TestReadVillageStorageFill_LiveFrame(t *testing.T) {
 	img := gocv.IMRead("/tmp/village.png", gocv.IMReadColor)
 	if img.Empty() {

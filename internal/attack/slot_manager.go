@@ -538,32 +538,59 @@ func (sm *SlotManager) GetSlot(unitName string) *TrackedSlot {
 	return sm.fallbackSpellSlot(n)
 }
 
-// ReleaseStackedSieges turns an unnamed "siege" card back into a troop when the
+// ReleaseStackedSieges turns a hero or siege label back into a troop when the
 // count badge shows a stack.
 //
-// The bar has no siege template for most armies, so the last unidentified card
-// before the first hero is labelled Siege. That is right for a single machine
-// and wrong for a second troop: live 2026-11-09 the card at x=138 read 25, the
-// siege phase tapped it once, and the sweep then skipped it because a siege is
-// one placement. A siege machine does not carry a stack badge above 1, so a
-// trusted count above 1 is a troop card and the sweep deploys the whole stack.
-// A named siege (template match) is left alone even if its count looks high.
+// A hero is one card and a siege machine is one placement. Neither carries an
+// xN badge above 1. Live 2026-11-09 the last unidentified card before the
+// heroes was labelled Siege, tapped once, and then skipped by the sweep.
+// Live 2026-11-10 the same leak wore a template name: "stone slammer" at
+// ~0.59 on a card reading x17, and "archer queen" at ~0.55 on a card reading
+// x25. The siege phase tapped the stack once and the sweep refused to touch
+// a siege; the hero phase single-tapped the other stack. A trusted count
+// above 1 clears that label so the sweep deploys the whole stack. A real
+// hero (no badge) and a real siege (count 0 or 1) stay as they are. A spell
+// badge (rage x5) is not a hero or a siege and is left alone.
 func (sm *SlotManager) ReleaseStackedSieges(counts map[int]int) {
 	if sm == nil {
 		return
 	}
 	for _, slot := range sm.slots {
-		if slot == nil || slot.UnitName != "" || slot.Category != "Siege" {
+		if slot == nil || counts[slot.X] <= 1 {
 			continue
 		}
-		if counts[slot.X] <= 1 {
+		if isSpellStatic(slot.UnitName) {
 			continue
 		}
+		hero := slot.Category == "Hero" || isHeroStatic(slot.UnitName)
+		siege := slot.Category == "Siege" || slot.Category == "CC" || isSiegeStatic(slot.UnitName) || strings.Contains(strings.ToLower(slot.UnitName), "castle")
+		if !hero && !siege {
+			continue
+		}
+		was := slot.UnitName
+		sm.dropUnitIndex(slot)
+		slot.UnitName = ""
 		slot.Category = "Troop"
+		slot.FallbackLabeled = false
+		slot.Confidence = 0
 		sm.logger.Info().
 			Int("x", slot.X).
 			Int("count", counts[slot.X]).
-			Msg("unnamed card before the heroes holds a troop stack, not a siege; the sweep will deploy all of it")
+			Str("was", was).
+			Msg("stack badge is a troop, not a hero or a siege; the sweep will deploy all of it")
+	}
+}
+
+// dropUnitIndex forgets a slot's name so GetSlot no longer returns the card
+// the template just mislabeled. A later slot that legitimately owns the same
+// name is left in the index.
+func (sm *SlotManager) dropUnitIndex(slot *TrackedSlot) {
+	if slot == nil || slot.UnitName == "" || sm.unitIndex == nil {
+		return
+	}
+	key := strings.ToLower(slot.UnitName)
+	if cur, ok := sm.unitIndex[key]; ok && cur == slot {
+		delete(sm.unitIndex, key)
 	}
 }
 
@@ -624,6 +651,30 @@ func (sm *SlotManager) fallbackSpellSlot(unitName string) *TrackedSlot {
 		return slot
 	}
 	return nil
+}
+
+// UnnamedTroopStacks returns troop cards the strategy never named and whose
+// badge is a real stack. Those cards are not in any phase, so they used to
+// wait until the sweep and then get dumped a second time by the event pass.
+// The main line can place them in one burst instead.
+func (sm *SlotManager) UnnamedTroopStacks(counts map[int]int) []*TrackedSlot {
+	if sm == nil {
+		return nil
+	}
+	var out []*TrackedSlot
+	for _, slot := range sm.slots {
+		if slot == nil || slot.UnitName != "" || slot.Category != "Troop" {
+			continue
+		}
+		if slot.State == SlotDeployed || slot.State == SlotFailed {
+			continue
+		}
+		if counts[slot.X] <= 1 {
+			continue
+		}
+		out = append(out, slot)
+	}
+	return out
 }
 
 // GetAllSlots returns all tracked slots.
