@@ -451,43 +451,39 @@ func TestVillageResources_IsFull(t *testing.T) {
 func TestReadVillageStorageFill_IgnoresDisplayScalePin(t *testing.T) {
 	m := gocv.NewMatWithSize(732, 860, gocv.MatTypeCV8UC3)
 	defer m.Close()
-	// Gold capsule edge, the row the digit text does not cover. BGR.
-	for x := 681; x < 812; x++ {
+	// Gold capsule edge, the row the digit text does not cover. BGR. The fill
+	// starts at x=691, which is the live bar at 21.4M of 27.5M (77.9%).
+	for x := 691; x < 812; x++ {
 		m.SetUCharAt(19, x*3+0, 5)
 		m.SetUCharAt(19, x*3+1, 180)
 		m.SetUCharAt(19, x*3+2, 220)
 	}
-	// Elixir half full on its edge row.
-	for x := 681; x < 681+65; x++ {
+	// Elixir at max: the live full bar starts at x=648.
+	for x := 648; x < 812; x++ {
 		m.SetUCharAt(56, x*3+0, 180)
 		m.SetUCharAt(56, x*3+1, 40)
 		m.SetUCharAt(56, x*3+2, 180)
 	}
 	res := ReadVillageStorageFillMat(m, 1.1334)
-	if res.GoldFillPercent < 95 {
-		t.Fatalf("gold = %.1f, a full bar must read at least 95", res.GoldFillPercent)
+	if res.GoldFillPercent < 75 || res.GoldFillPercent > 81 {
+		t.Fatalf("gold = %.1f, the 77.9%% bar must not read as full", res.GoldFillPercent)
 	}
-	if res.ElixirFillPercent < 40 || res.ElixirFillPercent > 60 {
-		t.Fatalf("elixir = %.1f, half bar should land near 50", res.ElixirFillPercent)
+	if res.ElixirFillPercent != 100 {
+		t.Fatalf("elixir = %.1f, a bar at max must read 100", res.ElixirFillPercent)
 	}
 }
 
 func TestReadVillageStorageFill_LiveFrame(t *testing.T) {
-	img := gocv.IMRead("/tmp/village.png", gocv.IMReadColor)
+	// VILLAGE_PNG is a village capture; the reading is logged for comparison
+	// with the storage tooltip (tap the bar in game for its Max).
+	img := gocv.IMRead(os.Getenv("VILLAGE_PNG"), gocv.IMReadColor)
 	if img.Empty() {
-		t.Skip("no /tmp/village.png live capture")
+		t.Skip("set VILLAGE_PNG to a live village capture")
 	}
 	defer img.Close()
 
 	res := ReadVillageStorageFillMat(img, 1.1334)
 	t.Logf("Village storage fill: Gold=%.1f%%, Elixir=%.1f%%, DE=%.1f%%",
 		res.GoldFillPercent, res.ElixirFillPercent, res.DEFillPercent)
-
-	if res.GoldFillPercent < 90.0 {
-		t.Errorf("GoldFillPercent = %.1f%%, expected >= 90%%", res.GoldFillPercent)
-	}
-	if res.ElixirFillPercent < 65.0 || res.ElixirFillPercent > 90.0 {
-		t.Errorf("ElixirFillPercent = %.1f%%, expected in [65..90]%%", res.ElixirFillPercent)
-	}
 }
 

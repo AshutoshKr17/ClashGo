@@ -1241,51 +1241,152 @@ func TestConfirmTapPointIgnoresGreenWhenTheDialogIsGone(t *testing.T) {
 	}
 }
 
-// TestWallChipsByPriceIconFollowsTheShiftedTray is the live 860x732 tray with
-// Upgrade More in it: the mapped gold rect (391,538)-(488,635) sits on Upgrade
-// More, and the real gold and elixir chips are one slot to the right.
-func TestWallChipsByPriceIconFollowsTheShiftedTray(t *testing.T) {
-	frame := gocv.NewMatWithSize(732, 860, gocv.MatTypeCV8UC3)
+// wallBatchGame is the wall tray as it behaved by hand on the live 860x732
+// client: Upgrade More opens the Add Wall tray at one wall, each Add Wall tap
+// adds one, an Upgrade chip opens the Okay/Cancel dialog, and Okay buys.
+type wallBatchGame struct {
+	// moreDead: Upgrade More does nothing, so the Add Wall tray never opens.
+	moreDead bool
+	// plusTen: a level with 10+ walls. Its batch tray keeps five buttons
+	// (Remove | +10 | +1 | gold | elixir), so nothing moves after Upgrade More.
+	plusTen bool
+
+	batch, dialog bool
+	count         int
+	resource      string
+	bought        map[string]int
+	single        int // one-wall purchases opened: the old flow's failure
+	taps          []image.Point
+}
+
+func (g *wallBatchGame) slots() (more, gold, elixir int) {
+	if g.batch && !g.plusTen {
+		return 384, 476, 568
+	}
+	return 430, 522, 614
+}
+
+func (g *wallBatchGame) Tap(x, y int) error {
+	g.taps = append(g.taps, image.Pt(x, y))
+	near := func(cx int) bool { return x > cx-30 && x < cx+30 && y > 576 && y < 636 }
+	more, gold, elixir := g.slots()
+	switch {
+	case g.dialog && image.Pt(x, y).In(wallBatchOkay.ImageRect()):
+		g.bought[g.resource] += g.count
+		g.dialog, g.batch, g.count = false, false, 0
+	case g.dialog && image.Pt(x, y).In(wallBatchCancel.ImageRect()):
+		g.dialog = false
+	case g.dialog:
+	case near(more) && !g.batch && !g.moreDead:
+		g.batch, g.count = true, 1
+	case near(more) && g.batch:
+		g.count++
+	case (near(gold) || near(elixir)) && !g.batch:
+		g.single++
+	case near(gold):
+		g.dialog, g.resource = true, "gold"
+	case near(elixir):
+		g.dialog, g.resource = true, "elixir"
+	}
+	return nil
+}
+func (g *wallBatchGame) TapRandomized(x, y int) error        { return g.Tap(x, y) }
+func (g *wallBatchGame) Swipe(int, int, int, int, int) error { return nil }
+func (g *wallBatchGame) Back() error                         { return nil }
+
+func (g *wallBatchGame) CaptureToMat() (gocv.Mat, error) {
+	m := gocv.NewMatWithSize(732, 860, gocv.MatTypeCV8UC3)
+	m.SetTo(gocv.NewScalar(60, 90, 70, 0))
+	coin := color.RGBA{255, 205, 30, 255}
+	// This base's wall tops are the tray coin's gold. They sat where the old
+	// detector looked, and it took one for the gold chip.
+	for _, x := range []int{660, 700, 747, 794} {
+		gocv.Circle(&m, image.Pt(x, 590), 8, coin, -1)
+	}
+	if g.dialog {
+		gocv.Rectangle(&m, wallBatchOkay.ImageRect(), confirmFaceGreen, -1)
+		gocv.Rectangle(&m, wallBatchCancel.ImageRect(), color.RGBA{240, 110, 30, 255}, -1)
+		return m, nil
+	}
+	more, gold, elixir := g.slots()
+	gocv.Circle(&m, image.Pt(gold+33, 576), 8, coin, -1)
+	gocv.Circle(&m, image.Pt(elixir+33, 575), 6, color.RGBA{230, 60, 230, 255}, -1)
+	if g.batch {
+		gocv.Rectangle(&m, image.Rect(more+2, 590, more+17, 606), color.RGBA{60, 220, 60, 255}, -1)
+	}
+	return m, nil
+}
+
+func runWallBatch(t *testing.T, g *wallBatchGame, resource string) bool {
+	t.Helper()
+	g.bought = map[string]int{}
+	h := &WallUpgradeHooks{Logger: zerolog.Nop(), Client: g, Sleep: func(time.Duration) {}}
+	frame, _ := g.CaptureToMat()
 	defer frame.Close()
-	frame.SetTo(gocv.NewScalar(60, 90, 70, 0))
-	white := color.RGBA{250, 250, 250, 255}
-	gocv.Rectangle(&frame, image.Rect(500, 570, 552, 582), white, -1)
-	gocv.Circle(&frame, image.Pt(562, 576), 8, color.RGBA{255, 205, 30, 255}, -1)
-	gocv.Rectangle(&frame, image.Rect(590, 568, 638, 580), white, -1)
-	gocv.Circle(&frame, image.Pt(647, 574), 8, color.RGBA{230, 60, 230, 255}, -1)
+	tray, ok := readWallTray(frame)
+	if !ok {
+		t.Fatal("the 5-button wall tray was not read")
+	}
+	if tray.More != image.Pt(430, 606) || tray.Gold != image.Pt(522, 606) || tray.Elixir != image.Pt(614, 606) || tray.Batch {
+		t.Fatalf("tray = %+v, want Upgrade More 430, gold 522, elixir 614", tray)
+	}
+	return upgradeWallBatch(h, tray, resource, wallBatchSize, Rect{X1: 602, Y1: 239, X2: 646, Y2: 279}, 0)
+}
 
-	mappedGold := Rect{X1: 391, Y1: 538, X2: 488, Y2: 635}
-	gold, elixir, gOK, eOK := wallChipsByPriceIcon(frame, mappedGold)
-	if !gOK || !eOK {
-		t.Fatalf("price icons not found: gold=%v elixir=%v", gOK, eOK)
-	}
-	near := func(r Rect, x, y int) bool {
-		cx, cy := r.Center()
-		return cx > x-12 && cx < x+12 && cy > y-12 && cy < y+12
-	}
-	if !near(gold, 522, 600) {
-		t.Fatalf("gold chip %v, want centre near (522,600)", gold)
-	}
-	if !near(elixir, 615, 604) {
-		t.Fatalf("elixir chip %v, want centre near (615,604)", elixir)
-	}
-
-	// A coin with no price beside it (a village gold-mine bubble) is not a chip.
-	bare := gocv.NewMatWithSize(732, 860, gocv.MatTypeCV8UC3)
-	defer bare.Close()
-	bare.SetTo(gocv.NewScalar(60, 90, 70, 0))
-	gocv.Circle(&bare, image.Pt(300, 576), 8, color.RGBA{255, 205, 30, 255}, -1)
-	if _, _, gOK, eOK := wallChipsByPriceIcon(bare, mappedGold); gOK || eOK {
-		t.Fatal("a coin with no price tag was taken for an Upgrade chip")
+// TestWallBatchBuysThreeWallsThroughUpgradeMore is the flow tapped by hand on
+// 2026-11-11: Upgrade More, Add Wall twice, the resource's Upgrade, Okay.
+func TestWallBatchBuysThreeWallsThroughUpgradeMore(t *testing.T) {
+	for _, tc := range []struct {
+		resource string
+		plusTen  bool
+	}{{"gold", false}, {"elixir", false}, {"gold", true}, {"elixir", true}} {
+		resource := tc.resource
+		g := &wallBatchGame{plusTen: tc.plusTen}
+		if !runWallBatch(t, g, resource) {
+			t.Fatalf("%s batch reported no purchase; taps %v", resource, g.taps)
+		}
+		if g.bought[resource] != wallBatchSize || len(g.bought) != 1 || g.single != 0 {
+			t.Fatalf("%s batch bought %v (one-wall dialogs: %d), want %d walls with %s only; taps %v",
+				resource, g.bought, g.single, wallBatchSize, resource, g.taps)
+		}
 	}
 
-	if live := os.Getenv("WALL_TRAY_PNG"); live != "" {
-		img := gocv.IMRead(live, gocv.IMReadColor)
-		defer img.Close()
-		g, e, gOK, eOK := wallChipsByPriceIcon(img, mappedGold)
-		gx, gy := g.Center()
-		ex, ey := e.Center()
-		t.Logf("live %s: gold %v (%d,%d) elixir %v (%d,%d)", live, gOK, gx, gy, eOK, ex, ey)
+	// Upgrade More that does not open the Add Wall tray gets one tap and no more:
+	// the repeated blind taps are what selected other walls on the live run.
+	dead := &wallBatchGame{moreDead: true}
+	if runWallBatch(t, dead, "gold") {
+		t.Fatal("a batch that never opened was reported as bought")
+	}
+	if len(dead.taps) != 1 || dead.single != 0 {
+		t.Fatalf("taps after Upgrade More failed to open the batch tray: %v", dead.taps)
+	}
+}
+
+// TestWallTrayLiveFrames reads the frames captured during that hand test.
+// PNGs are gitignored, so this skips on a checkout without them.
+func TestWallTrayLiveFrames(t *testing.T) {
+	for _, tc := range []struct {
+		file          string
+		tray, batch   bool
+		moreX, dialog int
+	}{
+		{"testdata/wall_tray_5.png", true, false, 430, 0},
+		{"testdata/wall_tray_batch.png", true, true, 384, 0},
+		{"testdata/wall_tray_batch_plus10.png", true, true, 430, 0},
+		{"testdata/wall_batch_dialog.png", false, false, 0, 1},
+		{"testdata/wall_village.png", false, false, 0, 0},
+	} {
+		img := gocv.IMRead(tc.file, gocv.IMReadColor)
+		if img.Empty() {
+			t.Skipf("no %s", tc.file)
+		}
+		tray, ok := readWallTray(img)
+		dialog := wallBatchDialogUp(img)
+		img.Close()
+		if ok != tc.tray || tray.Batch != tc.batch || tray.More.X != tc.moreX || dialog != (tc.dialog == 1) {
+			t.Errorf("%s: tray=%v %+v dialog=%v, want tray=%v batch=%v more=%d dialog=%v",
+				tc.file, ok, tray, dialog, tc.tray, tc.batch, tc.moreX, tc.dialog == 1)
+		}
 	}
 }
 
@@ -1836,12 +1937,28 @@ func TestLiveCropsPinTheConfirmSignature(t *testing.T) {
 }
 
 func TestWallDumpStartsFullAndStopsAtTwenty(t *testing.T) {
-	full := game.VillageResources{GoldFillPercent: 96, ElixirFillPercent: 40}
-	if !wallDumpFull(full, "both", 95) {
-		t.Fatal("gold at 96 must start a both-resource dump")
+	// Either full bar buys a batch with that resource alone.
+	goldFull := game.VillageResources{GoldFillPercent: 100, ElixirFillPercent: 40}
+	if got := wallFullResources(goldFull, "both"); !wallDumpFull(goldFull, "both", 95) || len(got) != 1 || got[0] != "gold" {
+		t.Fatalf("gold full, elixir at 40: batch with %v, want gold only", got)
 	}
-	if wallDumpSpent(full, "both") {
-		t.Fatal("elixir at 40 is still above 20")
+	// Gold at 98.5% read 99.0 on the live run; that is not full.
+	elixirFull := game.VillageResources{GoldFillPercent: 99, ElixirFillPercent: 100}
+	if got := wallFullResources(elixirFull, "both"); len(got) != 1 || got[0] != "elixir" {
+		t.Fatalf("gold at 99, elixir full: batch with %v, want elixir only", got)
+	}
+	if wallDumpFull(game.VillageResources{GoldFillPercent: 99, ElixirFillPercent: 99}, "both", 95) {
+		t.Fatal("neither bar is full; no batch")
+	}
+	if got := wallFullResources(goldFull, "gold"); got != nil {
+		t.Fatalf("a gold-only setting dumps to 20%%, it does not batch: %v", got)
+	}
+	both := game.VillageResources{GoldFillPercent: 100, ElixirFillPercent: 100}
+	if !wallDumpFull(both, "both", 95) {
+		t.Fatal("both bars at 100 must start the dump")
+	}
+	if wallDumpSpent(both, "both") {
+		t.Fatal("full bars must not read as spent")
 	}
 	low := game.VillageResources{GoldFillPercent: 20, ElixirFillPercent: 18}
 	if !wallDumpSpent(low, "both") {
@@ -1853,6 +1970,9 @@ func TestWallDumpStartsFullAndStopsAtTwenty(t *testing.T) {
 	goldOnly := game.VillageResources{GoldFillPercent: 19, ElixirFillPercent: 100}
 	if !wallDumpSpent(goldOnly, "gold") {
 		t.Fatal("a gold-only dump ignores a full elixir bar")
+	}
+	if wallDumpFull(game.VillageResources{GoldFillPercent: 96}, "gold", 95) == false {
+		t.Fatal("a gold-only dump still starts from its own bar")
 	}
 	if wallDumpSpent(game.VillageResources{}, "both") {
 		t.Fatal("a covered HUD reads as empty bars and must not end the dump")

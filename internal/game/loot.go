@@ -1143,9 +1143,16 @@ func (lr *LootRecognizer) ReadVillageStorageFill(screen gocv.Mat) VillageResourc
 // device). The bars live in framebuffer pixels. Multiplying the old sample
 // row by that pin landed at y=44 and y=86 on an 860×732 village, and the
 // capsules are at y=18–40 (gold) and y=52–68 (elixir). A full storage then
-// read as 0, so the wall dump never started. Positions below were measured
-// on that frame: the track is x = w-179 .. w-48, and the fullest row of the
-// capsule is the fill (the digit row in the middle is mostly white text).
+// read as 0, so the wall dump never started. The fullest row of the capsule
+// is the fill (the digit row in the middle is mostly white text).
+//
+// Gold and elixir track: x = w-210 .. w-17. The fill grows leftwards from the
+// right end, and the coin/drop icon covers the last 31 px (from w-48), so
+// those are counted as filled whenever any fill shows. Measured live
+// 2026-11-11: gold 21,411,113 of max 27,500,000 (77.9%) fills from x=691,
+// elixir at max fills from x=648, elixir 26.0M of 29.5M from x=671. The old
+// track (w-179 .. w-48) read that gold bar as 91.6 and anything over 83% as
+// 100, which started the "both at 100%" wall batch early.
 func ReadVillageStorageFillMat(screen gocv.Mat, scale float64) VillageResources {
 	if screen.Empty() {
 		return VillageResources{}
@@ -1172,9 +1179,13 @@ func ReadVillageStorageFillMat(screen gocv.Mat, scale float64) VillageResources 
 		return VillageResources{}
 	}
 
-	gold := storageBarPercent(screen, int(16*sy), int(42*sy), left, right, storageGoldPixel)
-	elixir := storageBarPercent(screen, int(50*sy), int(68*sy), left, right, storageElixirPixel)
-	de := storageBarPercent(screen, int(70*sy), int(80*sy), left, right, storageDEPixel)
+	wide := max(0, w-int(210*sx))
+	hidden := int(31 * sx)
+	gold := storageBarPercent(screen, int(16*sy), int(42*sy), wide, right, hidden, storageGoldPixel)
+	elixir := storageBarPercent(screen, int(50*sy), int(68*sy), wide, right, hidden, storageElixirPixel)
+	// ponytail: the dark elixir bar is shorter and its track was not
+	// re-measured; walls never spend it. Re-measure before gating on it.
+	de := storageBarPercent(screen, int(70*sy), int(80*sy), left, right, 0, storageDEPixel)
 	return VillageResources{
 		GoldFillPercent:   gold,
 		ElixirFillPercent: elixir,
@@ -1182,7 +1193,9 @@ func ReadVillageStorageFillMat(screen gocv.Mat, scale float64) VillageResources 
 	}
 }
 
-func storageBarPercent(screen gocv.Mat, y0, y1, x0, x1 int, match func(b, g, r int) bool) float64 {
+// storageBarPercent reads one bar. hidden is the part of the track behind the
+// resource icon, right of x1: it is filled whenever any fill is visible.
+func storageBarPercent(screen gocv.Mat, y0, y1, x0, x1, hidden int, match func(b, g, r int) bool) float64 {
 	width := x1 - x0
 	if width <= 0 {
 		return 0
@@ -1209,7 +1222,10 @@ func storageBarPercent(screen gocv.Mat, y0, y1, x0, x1 int, match func(b, g, r i
 			best = n
 		}
 	}
-	pct := (float64(best) / float64(width)) * 100.0
+	if best == 0 {
+		return 0
+	}
+	pct := (float64(best+hidden) / float64(width+hidden)) * 100.0
 	if pct > 100 {
 		pct = 100
 	}

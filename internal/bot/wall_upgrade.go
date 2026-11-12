@@ -241,6 +241,10 @@ type WallUpgradeHooks struct {
 	// WallResource specifies resource preference ("gold", "elixir", "both").
 	WallResource string
 
+	// Batch is the resources that each buy one batch of wallBatchSize walls,
+	// one pass per entry, in order. Empty means the one-wall flow.
+	Batch []string
+
 	// OnStep is the optional phase-boundary instrumentation hook.
 	OnStep func(step string, data map[string]any)
 
@@ -262,9 +266,36 @@ func (h *WallUpgradeHooks) sleep(d time.Duration) {
 	time.Sleep(d)
 }
 
-// wallDumpStopPercent is the storage-bar floor the wall dump spends down to.
-// Attacks resume once every watched resource is at or below this percent.
+// wallDumpStopPercent is the storage-bar floor a single-resource dump spends
+// down to. The both-resources setting does not use it: there each full bar
+// buys one batch of walls (wallFullResources).
 const wallDumpStopPercent = 20.0
+
+// wallBatchSize is how many walls one batch buys. Upgrade More starts the
+// batch at one wall and each Add Wall (+1) tap adds one, so five walls is
+// Upgrade More and then +1 four times.
+const wallBatchSize = 5
+
+// wallFullResources lists the storages that buy a wall batch now, gold first:
+// each bar that reads full, on its own. It is empty unless both resources are
+// watched; a one-resource setting keeps its dump down to wallDumpStopPercent.
+//
+// 99.5 is the full track less one pixel (a pixel is 0.5%). Live 02:55 gold at
+// 27,080,861 of 27,500,000 (98.5%) read 99.0, which is not full.
+func wallFullResources(fill game.VillageResources, resource string) []string {
+	gold, elixir := wallWatch(resource)
+	if !gold || !elixir {
+		return nil
+	}
+	var full []string
+	if fill.GoldFillPercent >= 99.5 {
+		full = append(full, "gold")
+	}
+	if fill.ElixirFillPercent >= 99.5 {
+		full = append(full, "elixir")
+	}
+	return full
+}
 
 // wallWatch reports which storage bars a wall dump spends. Walls take gold
 // or elixir; dark elixir is never one of them. An empty preference watches both.
@@ -279,13 +310,18 @@ func wallWatch(resource string) (gold, elixir bool) {
 	}
 }
 
-// wallDumpFull reports whether a wall dump should start: at least one watched
-// storage bar is at or above the full threshold (95 when unset).
+// wallDumpFull reports whether a wall dump should start. With both resources
+// watched, either bar reading full starts it (wallFullResources). A
+// one-resource dump starts when that bar is at or above the full threshold
+// (95 when unset).
 func wallDumpFull(fill game.VillageResources, resource string, fullPct float64) bool {
 	if fullPct <= 0 {
 		fullPct = 95
 	}
 	gold, elixir := wallWatch(resource)
+	if gold && elixir {
+		return len(wallFullResources(fill, resource)) > 0
+	}
 	return (gold && fill.GoldFillPercent >= fullPct) || (elixir && fill.ElixirFillPercent >= fullPct)
 }
 
@@ -315,8 +351,9 @@ func wallDumpSpent(fill game.VillageResources, resource string) bool {
 
 // UpgradeWalls spends walls until the watched storages fall to
 // wallDumpStopPercent, or until the next wall is unaffordable. The caller
-// starts it only when a watched storage is full.
-func (b *Bot) UpgradeWalls(gc *game.GameContext) {
+// starts it only when a watched storage is full. batch is the resources that
+// each buy one wall batch instead (wallFullResources); nil is the plain dump.
+func (b *Bot) UpgradeWalls(gc *game.GameContext, batch []string) {
 	resource := b.cfg.Upgrade.WallResource
 	if resource == "" {
 		resource = "both"
@@ -357,6 +394,7 @@ func (b *Bot) UpgradeWalls(gc *game.GameContext) {
 			return spent
 		},
 		WallResource: resource,
+		Batch:        batch,
 		// Keeps the frames the confirm decision was made on, so a skipped or
 		// misplaced confirm tap can be checked against what was on screen.
 		OnStep: func(step string, data map[string]any) {
@@ -365,7 +403,7 @@ func (b *Bot) UpgradeWalls(gc *game.GameContext) {
 				return
 			}
 			defer frame.Close()
-			if step == "asset_driven_confirm_page" || step == "asset_driven_tray_gate" {
+			if step == "asset_driven_confirm_page" || step == "asset_driven_tray_gate" || strings.HasPrefix(step, "wall_batch_") {
 				name, _ := data["name"].(string)
 				_ = gocv.IMWrite(paths.ResolveConfig("wall_"+step+"_"+name+".png"), frame)
 			}
@@ -479,11 +517,17 @@ func RunWallUpgradeLoop(h *WallUpgradeHooks) {
 		h.Logger.Info().Msg("Template-matching fallback: no rect assets loaded — using btn_upgrade_wall template + cost-color")
 	}
 
+	batching := len(h.Batch) > 0
 	for upgradeCount := 1; ; upgradeCount++ {
 		// Stop check: the loop is otherwise unbounded (it only exits
 		// when no affordable wall remains). Breaking at the iteration
 		// boundary keeps a user Stop from leaving the bot tapping
 		// walls for minutes.
+		if batching && upgradeCount > len(h.Batch) {
+			h.Logger.Info().Int("walls", wallBatchSize).Strs("resources", h.Batch).Msg("wall batch passes done")
+			h.step("batch_done", nil)
+			break
+		}
 		if h.StopCheck != nil && h.StopCheck() {
 			h.Logger.Info().Msg("Wall upgrade loop stopped by stop signal")
 			h.step("stopped", nil)
@@ -851,6 +895,22 @@ func RunWallUpgradeLoop(h *WallUpgradeHooks) {
 					Msg("x_popup_roi_alt already reads as a popup's close control on the pre-tap baseline (it overlaps permanent screen chrome, e.g. a red HUD element). It can no longer witness a chained popup. Re-pick it: ./tools/picker.py -o assets/wall_upgrade_x_roi.json --rect x_popup_roi_alt")
 			}
 
+			// One batch per pass through Upgrade More, paid with that pass's
+			// full resource. A tray this client does not draw the verified
+			// way falls through to the one-wall flow below.
+			want := strings.ToLower(h.WallResource)
+			if batching {
+				want = h.Batch[upgradeCount-1]
+			}
+			if batching && gate.TrayOK {
+				name := want
+				bought := upgradeWallBatch(h, gate.Tray, name, wallBatchSize, xPopupRect, basePopupRed)
+				h.Logger.Info().Str("resource", name).Bool("bought", bought).Int("walls", wallBatchSize).Msg("wall batch pass finished")
+				h.step("wall_batch_result", map[string]any{"name": name, "bought": bought})
+				runDismiss(h)
+				continue
+			}
+
 			success := false
 			type btnInfo struct {
 				rect   Rect
@@ -858,7 +918,7 @@ func RunWallUpgradeLoop(h *WallUpgradeHooks) {
 				name   string
 			}
 			var buttons []btnInfo
-			switch strings.ToLower(h.WallResource) {
+			switch want {
 			case "elixir":
 				buttons = []btnInfo{
 					{rect: gate.ElixirChip, mapped: elixirBtn, name: "elixir"},
@@ -2198,85 +2258,200 @@ func confirmTapPoint(screen gocv.Mat, confirm Rect) (image.Point, bool) {
 	return findConfirmButton(screen, confirm)
 }
 
-// wallChipsByPriceIcon finds the gold and elixir Upgrade chips from the price
-// tag on top of each: a white (affordable) or red (short) price followed by a
-// gold coin or a pink elixir drop. ref is any mapped chip rect; it supplies
-// the tray's row and the chip size. Measured live 860x732 (wall level 10):
-// coin at (562,576) on the chip centred (522,600), drop at (647,574) on the
-// chip centred (615,604). A chip whose icon is not found comes back empty so
-// the caller does not tap it.
-func wallChipsByPriceIcon(screen gocv.Mat, ref Rect) (gold, elixir Rect, goldOK, elixirOK bool) {
-	r := ref.ImageRect()
-	if r.Empty() || screen.Cols() == 0 || screen.Rows() == 0 || screen.Channels() < 3 {
-		return
+// wallTray is the selected-wall button tray, as tapped by hand on the live
+// 860x732 client (2026-11-11). It is centred on the screen with a 92 px pitch
+// and the two Upgrade chips are always its last two buttons:
+//
+//	5 buttons  Info | Select Row | Upgrade More | gold | elixir   (more 430, gold 522, elixir 614)
+//	4 buttons  Info | Upgrade More | gold | elixir                (more 384, gold 476, elixir 568)
+//	batch      Remove Wall | Add Wall | gold | elixir             (same slots as 4 buttons)
+//	batch 10+  Remove Wall | +10 | Add Wall | gold | elixir       (same slots as 5 buttons)
+//
+// Upgrade More turns the tray into the batch tray ("Wall (Level 8) x 1"), and
+// each Add Wall (+1) tap adds one wall; the chip prices grow with the count.
+// The +1 is that tray button. It is not drawn on the wall.
+type wallTray struct {
+	// More is Upgrade More, or Add Wall once the batch tray is up.
+	More, Gold, Elixir image.Point
+	Batch              bool
+}
+
+// Reference-frame (860x732) measurements for the wall tray and the batch
+// dialog. The dialog is "Upgrade Walls / Do you really want to upgrade the
+// selected Walls for 150000 Gold?" with an orange Cancel and a green Okay; it
+// is a different dialog from the one-wall Confirm and sits mid-screen, which
+// is why the mapped confirm rect never saw it.
+var (
+	wallTrayRowY    = 606
+	wallTrayPitch   = 92
+	wallBatchOkay   = Rect{X1: 444, Y1: 405, X2: 624, Y2: 482}
+	wallBatchCancel = Rect{X1: 236, Y1: 405, X2: 414, Y2: 482}
+)
+
+// refRect scales a reference-frame rect to the frame in hand.
+func refRect(screen gocv.Mat, r Rect) Rect {
+	sx, sy := float64(screen.Cols())/860, float64(screen.Rows())/732
+	return Rect{X1: int(float64(r.X1) * sx), Y1: int(float64(r.Y1) * sy), X2: int(float64(r.X2) * sx), Y2: int(float64(r.Y2) * sy)}
+}
+
+func refBox(screen gocv.Mat, cx, cy, hw, hh int) Rect {
+	return refRect(screen, Rect{X1: cx - hw, Y1: cy - hh, X2: cx + hw, Y2: cy + hh})
+}
+
+// readWallTray finds the tray from the elixir chip's price tag: the pink drop
+// 33 px right of the chip centre, with the gold chip's coin one slot to its
+// left. Pink is rare on screen; the gold coin alone is not, because this
+// base's wall tops are the same gold (that is what put the old "gold chip" on
+// a wall piece). Measured: drop 57-58 px, coin 92-106 px, +1 glyph 129 px,
+// and 0 for each in the other tray's boxes.
+func readWallTray(screen gocv.Mat) (wallTray, bool) {
+	if screen.Empty() || screen.Channels() < 3 {
+		return wallTray{}, false
 	}
-	k := float64(r.Dy()) / 97.0
-	band := image.Rect(0, r.Min.Y, screen.Cols(), r.Min.Y+r.Dy()/2).
-		Intersect(image.Rect(0, 0, screen.Cols(), screen.Rows()))
-	if band.Empty() {
-		return
+	sx, sy := float64(screen.Cols())/860, float64(screen.Rows())/732
+	area := sx * sy
+	pink := func(b, g, r int) bool { return r > 170 && b > 170 && g < 120 }
+	coin := func(b, g, r int) bool { return r > 200 && g > 150 && b < 90 }
+	pt := func(x int) image.Point { return image.Pt(int(float64(x)*sx), int(float64(wallTrayRowY)*sy)) }
+	for _, elixirX := range []int{614, 568} {
+		goldX := elixirX - wallTrayPitch
+		if colourFacePixelsIn(screen, refBox(screen, elixirX+33, 575, 12, 11), pink) < int(25*area) ||
+			colourFacePixelsIn(screen, refBox(screen, goldX+33, 576, 12, 11), coin) < int(25*area) {
+			continue
+		}
+		t := wallTray{More: pt(goldX - wallTrayPitch), Gold: pt(goldX), Elixir: pt(elixirX)}
+		// The batch tray draws a green "+1" on the slot left of the gold chip,
+		// 10 px right of its centre: 129-130 green px in both batch layouts, 0
+		// on Upgrade More (its plus is white). The first version looked for it
+		// in the 4-button layout only, so the 02:55 run opened the 5-button
+		// batch tray (a level with 10+ walls adds "+10") and then gave up.
+		t.Batch = greenFacePixelsIn(screen, refBox(screen, goldX-wallTrayPitch+10, 598, 14, 14)) >= int(60*area)
+		return t, true
 	}
-	isGold := func(b, g, rr int) bool { return rr > 200 && g > 150 && b < 90 && rr > b+120 }
-	isElixir := func(b, g, rr int) bool { return rr > 170 && b > 170 && g < 120 }
-	isPrice := func(b, g, rr int) bool {
-		return (rr > 225 && g > 225 && b > 225) || (rr > 200 && g < 100 && b < 100)
+	return wallTray{}, false
+}
+
+// wallBatchDialogUp is the batch purchase dialog: green Okay on the right and
+// orange Cancel on the left. Measured 5791 green and 7704 red with the dialog
+// up, 1 and 398 with the village behind those rects.
+func wallBatchDialogUp(screen gocv.Mat) bool {
+	if screen.Empty() || screen.Channels() < 3 {
+		return false
 	}
-	count := func(rect image.Rectangle, pred func(b, g, r int) bool) int {
-		return colourFacePixelsIn(screen, Rect{X1: rect.Min.X, Y1: rect.Min.Y, X2: rect.Max.X, Y2: rect.Max.Y}, pred)
+	area := float64(screen.Cols()) / 860 * float64(screen.Rows()) / 732
+	return greenFacePixelsIn(screen, refRect(screen, wallBatchOkay)) >= int(2500*area) &&
+		redFacePixelsIn(screen, refRect(screen, wallBatchCancel)) >= int(3000*area)
+}
+
+// upgradeWallBatch buys `walls` walls with one resource through Upgrade More
+// and reports whether the purchase went through. Every tap after the first is
+// made only on a frame that shows the control being tapped: the batch tray's
+// +1 before Add Wall, the Okay/Cancel dialog before Okay. xPopup and
+// basePopupRed are the buy-with-gems close control and its pre-tap red count.
+//
+// ponytail: a batch the resource cannot pay for is backed out of, not shrunk.
+// The pass runs only with both storages at 100%, and five of this base's
+// dearest walls (5M each, 25M) fit in one storage (gold max 27.5M, elixir
+// 29.5M). Shrink with Remove Wall (the tray's first button) if that stops
+// being true.
+func upgradeWallBatch(h *WallUpgradeHooks, tray wallTray, resource string, walls int, xPopup Rect, basePopupRed int) bool {
+	logger := h.Logger.With().Str("resource", resource).Logger()
+	tap := func(p image.Point, what string, wait time.Duration) bool {
+		logger.Info().Int("x", p.X).Int("y", p.Y).Msg("wall batch: tapping " + what)
+		h.step("wall_batch_tap", map[string]any{"what": what, "x": p.X, "y": p.Y})
+		if err := h.Client.Tap(p.X, p.Y); err != nil {
+			logger.Error().Err(err).Msg("wall batch: tap failed (" + what + ")")
+			return false
+		}
+		h.sleep(wait)
+		return true
 	}
-	find := func(pred func(b, g, r int) bool) (image.Point, bool) {
-		sub := screen.Region(band)
-		defer sub.Close()
-		cols := make([]int, sub.Cols())
-		sumY := make([]int, sub.Cols())
-		for y := 0; y < sub.Rows(); y++ {
-			for x := 0; x < sub.Cols(); x++ {
-				p := sub.GetVecbAt(y, x)
-				if pred(int(p[0]), int(p[1]), int(p[2])) {
-					cols[x]++
-					sumY[x] += y
-				}
+	// look captures a frame and hands it to the step receiver under a name
+	// that says which decision it fed. The caller closes the frame.
+	look := func(step string) (gocv.Mat, bool) {
+		m, err := h.Client.CaptureToMat()
+		if err != nil || m.Empty() {
+			logger.Warn().Err(err).Msg("wall batch: capture failed at " + step + "; sending no more taps")
+			m.Close()
+			return gocv.Mat{}, false
+		}
+		h.stepScreen("wall_batch_"+step, m, map[string]any{"name": resource})
+		return m, true
+	}
+
+	if !tray.Batch {
+		if !tap(tray.More, "Upgrade More", 900*time.Millisecond) {
+			return false
+		}
+		screen, ok := look("tray")
+		if !ok {
+			return false
+		}
+		batch, found := readWallTray(screen)
+		screen.Close()
+		if !found || !batch.Batch {
+			logger.Warn().Bool("tray_found", found).Msg("wall batch: Upgrade More did not open the Add Wall tray; not tapping further")
+			return false
+		}
+		tray = batch
+		for i := 1; i < walls; i++ {
+			if !tap(tray.More, "Add Wall (+1)", 500*time.Millisecond) {
+				return false
 			}
 		}
-		minW := max(6, int(8*k))
-		best, bestTotal := image.Point{}, 0
-		for x := 0; x < len(cols); {
-			if cols[x] < 2 {
-				x++
-				continue
-			}
-			x0, total, ys := x, 0, 0
-			for x < len(cols) && cols[x] >= 2 {
-				total += cols[x]
-				ys += sumY[x]
-				x++
-			}
-			if x-x0 < minW || total < int(30*k*k) {
-				continue
-			}
-			c := image.Pt(band.Min.X+(x0+x)/2, band.Min.Y+ys/total)
-			text := image.Rect(band.Min.X+x0-int(70*k), c.Y-int(8*k), band.Min.X+x0-int(3*k), c.Y+int(8*k))
-			if count(text, isPrice) < int(25*k*k) {
-				continue
-			}
-			if total > bestTotal {
-				best, bestTotal = c, total
-			}
+	}
+
+	chip := tray.Gold
+	if resource == "elixir" {
+		chip = tray.Elixir
+	}
+	if !tap(chip, resource+" Upgrade", 1200*time.Millisecond) {
+		return false
+	}
+	screen, ok := look("dialog")
+	if !ok {
+		return false
+	}
+	dialog := wallBatchDialogUp(screen)
+	gems, _ := xPopupPresent(screen, xPopup, basePopupRed)
+	okX, okY := refRect(screen, wallBatchOkay).Center()
+	cancelX, cancelY := refRect(screen, wallBatchCancel).Center()
+	screen.Close()
+	closeGems := func() {
+		x, y := xPopup.Center()
+		tap(image.Pt(x, y), "buy-with-gems X", time.Second)
+	}
+	if !dialog {
+		logger.Warn().Bool("gem_popup", gems).Msg("wall batch: the Upgrade Walls dialog did not open; nothing bought")
+		if gems {
+			closeGems()
 		}
-		return best, bestTotal > 0
+		return false
 	}
-	chip := func(icon image.Point, dx int) Rect {
-		cx, cy := icon.X-int(float64(dx)*k), icon.Y+int(26*k)
-		hw, hh := r.Dx()/2, r.Dy()/2
-		return Rect{X1: cx - hw, Y1: cy - hh, X2: cx + hw, Y2: cy + hh}
+
+	if !tap(image.Pt(okX, okY), "Okay", 1500*time.Millisecond) {
+		return false
 	}
-	if p, ok := find(isGold); ok {
-		gold, goldOK = chip(p, 40), true
+	screen, ok = look("after_okay")
+	if !ok {
+		return false
 	}
-	if p, ok := find(isElixir); ok {
-		elixir, elixirOK = chip(p, 32), true
+	dialog = wallBatchDialogUp(screen)
+	gems, _ = xPopupPresent(screen, xPopup, basePopupRed)
+	screen.Close()
+	if gems {
+		logger.Warn().Msg("wall batch: buy-with-gems popup after Okay, so this resource cannot pay; closing it, nothing bought")
+		closeGems()
+		if screen, ok = look("after_gems"); ok {
+			dialog = wallBatchDialogUp(screen)
+			screen.Close()
+		}
 	}
-	return
+	if dialog {
+		logger.Warn().Msg("wall batch: the Upgrade Walls dialog is still up after Okay; cancelling")
+		tap(image.Pt(cancelX, cancelY), "Cancel", 800*time.Millisecond)
+	}
+	return !gems && !dialog
 }
 
 // confirmTemplate is the Confirm button picture, when the store has it.
@@ -2426,10 +2601,16 @@ type wallTrayGate struct {
 	ElixirFacePx int
 	GoldFound    bool
 	ElixirFound  bool
+	// Tray is the tray read from its price tags (readWallTray). When TrayOK,
+	// the chips above are its slots, not the mapped rects.
+	Tray   wallTray
+	TrayOK bool
 }
 
 // Present reports whether an upgrade chip is on screen as a painted face.
-func (g wallTrayGate) Present() bool { return g.GoldFound || g.ElixirFound || (g.GoldFacePx > 1000 && g.ElixirFacePx > 1000) }
+func (g wallTrayGate) Present() bool {
+	return g.TrayOK || g.GoldFound || g.ElixirFound || (g.GoldFacePx > 1000 && g.ElixirFacePx > 1000)
+}
 
 // Data renders the gate's evidence for an OnStep payload. No *gocv.Mat here, so
 // the payload stays loggable — stepScreen is what carries frames.
@@ -2452,10 +2633,15 @@ func locateWallTray(screen gocv.Mat, gold, elixir Rect) wallTrayGate {
 	// The tray's button count changes with the selection (Select Row and
 	// Upgrade More come and go), so the chips slide sideways. Live 860x732 the
 	// mapped gold rect sat on Upgrade More and the mapped elixir rect on the
-	// gold chip. The price tag's coin or drop says which chip is which.
-	if g, e, gOK, eOK := wallChipsByPriceIcon(screen, gold); gOK || eOK {
-		gChip, gFound = g, gOK
-		eChip, eFound = e, eOK
+	// gold chip. The elixir chip's price tag says which tray this is.
+	tray, trayOK := readWallTray(screen)
+	if trayOK {
+		at := func(p image.Point, size Rect) Rect {
+			hw, hh := size.ImageRect().Dx()/2, size.ImageRect().Dy()/2
+			return Rect{X1: p.X - hw, Y1: p.Y - hh, X2: p.X + hw, Y2: p.Y + hh}
+		}
+		gChip, gFound = at(tray.Gold, gold), true
+		eChip, eFound = at(tray.Elixir, elixir), true
 	}
 	return wallTrayGate{
 		GoldChip:     gChip,
@@ -2466,6 +2652,8 @@ func locateWallTray(screen gocv.Mat, gold, elixir Rect) wallTrayGate {
 		ElixirFacePx: eFace,
 		GoldFound:    gFound,
 		ElixirFound:  eFound,
+		Tray:         tray,
+		TrayOK:       trayOK,
 	}
 }
 

@@ -1658,13 +1658,23 @@ func (b *Bot) executeAttackSequence(gc *game.GameContext) {
 				Float64("full_at", b.cfg.Storage.FullThresholdPercent).
 				Msg("village storage fill")
 			if wallDumpFull(fill, b.cfg.Upgrade.WallResource, b.cfg.Storage.FullThresholdPercent) {
-				b.logger.Info().
-					Float64("gold", fill.GoldFillPercent).
-					Float64("elixir", fill.ElixirFillPercent).
-					Float64("full_at", b.cfg.Storage.FullThresholdPercent).
-					Float64("stop_at", wallDumpStopPercent).
-					Msg("storages full; upgrading walls until they drop to 20%, then attacking")
-				b.UpgradeWalls(gc)
+				batch := wallFullResources(fill, b.cfg.Upgrade.WallResource)
+				if len(batch) > 0 {
+					b.logger.Info().
+						Float64("gold", fill.GoldFillPercent).
+						Float64("elixir", fill.ElixirFillPercent).
+						Int("walls", wallBatchSize).
+						Strs("with", batch).
+						Msg("storage full; upgrading one wall batch with each full resource")
+				} else {
+					b.logger.Info().
+						Float64("gold", fill.GoldFillPercent).
+						Float64("elixir", fill.ElixirFillPercent).
+						Float64("full_at", b.cfg.Storage.FullThresholdPercent).
+						Float64("stop_at", wallDumpStopPercent).
+						Msg("storage full; upgrading walls until it drops to 20%, then attacking")
+				}
+				b.UpgradeWalls(gc, batch)
 			}
 		}
 	}
@@ -1693,7 +1703,7 @@ func (b *Bot) executeAttackSequence(gc *game.GameContext) {
 					Msg("storages are full; checking if walls can burn resources")
 
 				if b.cfg.Storage.DumpToWallsBeforeHalt && b.cfg.Upgrade.UpgradeWalls {
-					b.UpgradeWalls(gc)
+					b.UpgradeWalls(gc, nil)
 					time.Sleep(1 * time.Second)
 					if fresh, ferr := b.client.CaptureToMat(); ferr == nil && !fresh.Empty() {
 						fill = game.ReadVillageStorageFillMat(fresh, scale)
